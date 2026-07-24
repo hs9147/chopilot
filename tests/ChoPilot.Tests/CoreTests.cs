@@ -96,6 +96,45 @@ public class StubAiMapperTests
     }
 }
 
+public class GuideServiceTests
+{
+    [Fact]
+    public void Build_ComputesProgress_AndNextHints()
+    {
+        // 트리: Material·Quantity 채움, DeliveryDate 비어있음
+        var tree = new UiNode("n0", "Form", null, null, null, new()
+        {
+            new("n1", "Edit", "품목코드", "M-001", null, new()),
+            new("n2", "Edit", "수량", "10", null, new()),
+            new("n3", "Edit", "납기", "", null, new()),   // 미입력
+            new("n4", "Edit", "거래처", "A사", null, new()),
+        });
+
+        var entry = new MappingEntry(
+            Signature: "sig", Scope: "global", UserId: null,
+            BusinessObject: "PurchaseRequest", RecordId: new RecordHint("url_query", "id", "PR123"),
+            Mapping: new()
+            {
+                new("n1", "Material", 0.95, "ai", false),
+                new("n2", "Quantity", 0.95, "ai", false),
+                new("n3", "DeliveryDate", 0.90, "ai", false),
+                new("n4", "Vendor", 0.92, "ai", false),
+            },
+            Confidence: 0.93, Status: "trusted");
+
+        var bo = BusinessObjectBuilder.Build(entry, tree);
+        var guide = GuideService.Build(entry, tree, bo);
+
+        Assert.Equal("PurchaseRequest", guide.BusinessObject);
+        Assert.Contains("PR123", guide.Summary);
+        Assert.Equal(4, guide.Required);
+        Assert.Equal(3, guide.Filled);                 // 납기 제외
+        Assert.Equal(0.75, guide.Ratio);
+        Assert.Single(guide.NextHints);                // 납기 힌트 1개
+        Assert.All(guide.NextHints, h => Assert.False(h.Actionable));  // Phase 1: 실행 불가
+    }
+}
+
 public class BedrockParseTests
 {
     [Fact]
