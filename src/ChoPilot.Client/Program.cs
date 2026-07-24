@@ -18,6 +18,7 @@ using Microsoft.Extensions.Configuration;
 //     3. PrivacyGate 적용(마스킹) → 화면 서명 계산
 //     4. --baseline : StubAiMapper(alias) 매핑 시도 (대조군)
 //        --bedrock  : Bedrock 동적 매핑 시도 (실 AI, appsettings 설정 사용)
+//        --upload [url] : 서버로 POST 후 Guide 조회 (기본 Server:IngestionEndpoint)
 //     5. ObservationEvent JSON을 stdout + (옵션)파일로 출력
 //
 //   설정: appsettings.json → appsettings.local.json → 환경변수(CHOPILOT_*) 순 오버라이드
@@ -53,6 +54,23 @@ var jsonOpts = new JsonSerializerOptions { WriteIndented = true };
 
 Console.Error.WriteLine($"[chopilot-dump] signature = {signature}");
 Console.Error.WriteLine($"[chopilot-dump] masked refs = {maskedRefs.Count}");
+
+if (opts.Upload)
+{
+    var url = opts.UploadUrl
+        ?? (string.IsNullOrWhiteSpace(cfg.Server.IngestionEndpoint) ? "http://127.0.0.1:5080" : cfg.Server.IngestionEndpoint);
+    Console.Error.WriteLine($"[chopilot-dump] upload → {url}");
+    using var uploader = new Uploader(url);
+    try
+    {
+        Console.Error.WriteLine("[chopilot-dump] ingest: " + await uploader.PostObservationAsync(evt));
+        Console.Error.WriteLine("[chopilot-dump] guide : " + await uploader.GetGuideAsync(evt.EventId));
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"[chopilot-dump] upload 실패: {ex.Message}");
+    }
+}
 
 if (opts.Baseline)
     await RunMapper("baseline(stub)", new StubAiMapper(), maskedTree);
@@ -121,6 +139,10 @@ static Options ParseArgs(string[] args)
             case "--delay" when i + 1 < args.Length: o.Delay = int.Parse(args[++i]); break;
             case "--baseline": o.Baseline = true; break;
             case "--bedrock": o.Bedrock = true; break;
+            case "--upload":
+                o.Upload = true;
+                if (i + 1 < args.Length && !args[i + 1].StartsWith("--")) o.UploadUrl = args[++i];
+                break;
         }
     }
     return o;
@@ -132,4 +154,6 @@ sealed class Options
     public int Delay { get; set; } = 3;
     public bool Baseline { get; set; }
     public bool Bedrock { get; set; }
+    public bool Upload { get; set; }
+    public string? UploadUrl { get; set; }
 }
