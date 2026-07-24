@@ -22,14 +22,20 @@ dotnet --version   # 8.x
 
 ---
 
-## 2. 솔루션 구성 (최초 1회)
+## 2. 빌드
+
+솔루션 파일 `ChoPilot.sln`은 저장소에 포함되어 있다.
 
 ```bash
-dotnet new sln -n ChoPilot
-dotnet sln add src/ChoPilot.Core src/ChoPilot.Mapping src/ChoPilot.Client tests/ChoPilot.Tests
 dotnet restore
 dotnet build
 ```
+
+> 설치가 안 돼 있으면 공식 스크립트로 사용자 로컬 설치(관리자 불요):
+> ```bash
+> powershell -ExecutionPolicy Bypass -Command "iwr https://dot.net/v1/dotnet-install.ps1 -OutFile $env:TEMP\dotnet-install.ps1; & $env:TEMP\dotnet-install.ps1 -Channel 8.0 -InstallDir $env:LOCALAPPDATA\Microsoft\dotnet"
+> ```
+> 그 후 `%LOCALAPPDATA%\Microsoft\dotnet` 을 PATH에 추가한다.
 
 ---
 

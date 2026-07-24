@@ -50,7 +50,7 @@ public sealed class BedrockAiMapper : IAiMapper
     }
 
     /// <summary>Bedrock 응답 → MappingInference. 모델 출력 텍스트에서 JSON 블록을 파싱.</summary>
-    internal static MappingInference Parse(string bedrockResponseJson, string businessHint, Concept[] ontology)
+    public static MappingInference Parse(string bedrockResponseJson, string businessHint, Concept[] ontology)
     {
         using var doc = JsonDocument.Parse(bedrockResponseJson);
         var text = doc.RootElement

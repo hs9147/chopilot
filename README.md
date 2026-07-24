@@ -40,14 +40,13 @@ tests/
 
 ### 빌드
 
-```bash
-# 솔루션 구성 (최초 1회)
-dotnet new sln -n ChoPilot
-dotnet sln add src/ChoPilot.Core src/ChoPilot.Mapping src/ChoPilot.Client tests/ChoPilot.Tests
+솔루션 파일 `ChoPilot.sln`은 저장소에 포함되어 있다.
 
-dotnet build
-dotnet test          # Windows/AWS 불요 — 순수 로직 검증
+```bash
+dotnet build         # net8.0 3개 + net8.0-windows 클라이언트
+dotnet test          # Windows/AWS 불요 — 순수 로직 6개 검증 (전부 통과 확인됨)
 ```
+> .NET 8 SDK 8.0.423 + Windows에서 빌드 0 경고 / 0 오류, 테스트 6/6 통과 검증 완료.
 
 ### Phase 0 관측 도구 실행 (Windows)
 
