@@ -8,6 +8,11 @@ obj/
 *.snapshot.json
 out/
 
+# Local config overrides (secrets/env-specific — not committed)
+appsettings.local.json
+.env
+.env.local
+
 # Node/Python (docs tooling only)
 node_modules/
 __pycache__/

@@ -13,6 +13,7 @@
 | [PHASE0-PLAN.md](PHASE0-PLAN.md) | Phase 0 위험 검증 실행계획 |
 | [PHASE0-KIT.md](PHASE0-KIT.md) | Phase 0 실행 키트 (템플릿·스키마·측정표) |
 | [PHASE1-DESIGN.md](PHASE1-DESIGN.md) | Phase 1 상세 설계 (Web Agent + Guide, 읽기 전용) |
+| [SETUP.md](SETUP.md) | 개발환경 설정 (요구사항·빌드·설정·AWS 자격증명·실행·트러블슈팅) |
 
 ## 확정 설계 전제
 
@@ -24,6 +25,7 @@
 ## 코드 (Phase 0 실측 스캐폴딩)
 
 > **요구:** Windows + .NET 8 SDK. (UIA는 Windows 전용 → 클라이언트는 `net8.0-windows`)
+> 상세 환경설정·AWS 자격증명·트러블슈팅은 **[SETUP.md](SETUP.md)** 참조.
 > 이 저장소는 현재 문서 환경에 dotnet이 없어 빌드 검증되지 않았다. 개발 PC에서 아래로 빌드한다.
 
 ```
