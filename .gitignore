@@ -1,0 +1,13 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+
+# Output
+*.snapshot.json
+out/
+
+# Node/Python (docs tooling only)
+node_modules/
+__pycache__/

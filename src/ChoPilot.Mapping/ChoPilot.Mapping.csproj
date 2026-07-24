@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Bedrock 호출용. StubAiMapper만 쓸 경우 없어도 빌드되지만, BedrockAiMapper에 필요. -->
+    <PackageReference Include="AWSSDK.BedrockRuntime" Version="3.7.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ChoPilot.Core\ChoPilot.Core.csproj" />
+  </ItemGroup>
+
+</Project>
