@@ -15,11 +15,15 @@ public sealed class ChoPilotConfig
 
 public sealed class AwsConfig
 {
-    /// <summary>Bedrock 리전 (예: ap-northeast-2, us-east-1).</summary>
-    public string Region { get; set; } = "ap-northeast-2";
+    /// <summary>Bedrock 리전 (예: us-east-1, ap-northeast-2).</summary>
+    public string Region { get; set; } = "us-east-1";
 
-    /// <summary>테넌트에서 가용한 모델 ID로 교체.</summary>
-    public string BedrockModelId { get; set; } = "anthropic.claude-3-5-sonnet-20240620-v1:0";
+    /// <summary>
+    /// 모델 ID. 현재 Anthropic 모델은 ON_DEMAND 직접 호출이 안 되고
+    /// <b>inference profile</b>(us./global. 접두사)만 지원한다.
+    /// (검증된 값 예시; 테넌트에서 `aws bedrock list-inference-profiles`로 확인 후 교체)
+    /// </summary>
+    public string BedrockModelId { get; set; } = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 }
 
 public sealed class MappingConfig

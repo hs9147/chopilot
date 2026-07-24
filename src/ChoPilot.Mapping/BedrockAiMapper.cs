@@ -19,7 +19,9 @@ public sealed class BedrockAiMapper : IAiMapper
     public BedrockAiMapper(IAmazonBedrockRuntime client, string modelId)
     {
         _client = client;
-        _modelId = modelId; // 예: "anthropic.claude-3-5-sonnet-20240620-v1:0" (테넌트 가용 모델로 교체)
+        // 현재 Anthropic 모델은 inference profile ID를 사용한다(ON_DEMAND 미지원).
+        // 예: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        _modelId = modelId;
     }
 
     public async Task<MappingInference> InferAsync(

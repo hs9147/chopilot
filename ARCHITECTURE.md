@@ -104,7 +104,7 @@ Status : Design
 | Vector Store | 메일/문서 청크 임베딩, Semantic Search |
 | Business Understanding | 3축 융합 → 현재업무/목적/진행률/다음작업 |
 | Workflow Engine | Guide→Validation→승인→Automation→Audit(§7) |
-| LLM Gateway | Bedrock 라우팅, 토큰/비용 관리, 프롬프트 캐시, 모델 추상화 |
+| LLM Gateway | Bedrock 라우팅, 토큰/비용 관리, 프롬프트 캐시, 모델 추상화. **모델 ID는 inference profile(us./global.) 사용** — 현재 Anthropic 모델은 ON_DEMAND 직접 호출 미지원(PoC 실측) |
 
 ### 3.3 Observation Tiers — 협조 수준별 관측 (D3 반영)
 

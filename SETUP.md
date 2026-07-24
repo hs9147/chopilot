@@ -87,8 +87,17 @@ export AWS_REGION=ap-northeast-2
 
 Bedrock 접근 확인:
 ```bash
-aws bedrock list-foundation-models --region ap-northeast-2
+aws sts get-caller-identity
+aws bedrock list-foundation-models --region us-east-1 --by-provider anthropic
 ```
+
+> **⚠️ Inference Profile 필수 (실측 확인됨)**
+> 현재 Anthropic 모델(Haiku 4.5, Sonnet 4.5 등)은 **ON_DEMAND 직접 호출을 지원하지 않고 inference profile로만** 호출된다. 모델 ID로 base ID(`anthropic.claude-...`)가 아니라 **profile ID(`us.` / `global.` 접두사)**를 써야 한다.
+> ```bash
+> aws bedrock list-inference-profiles --region us-east-1
+> # 예: us.anthropic.claude-haiku-4-5-20251001-v1:0  (검증됨)
+> ```
+> base ID를 쓰면 `ResourceNotFoundException`(legacy/ON_DEMAND 불가)이 난다.
 
 ---
 
@@ -115,5 +124,6 @@ dotnet run --project src/ChoPilot.Client -- --delay 3 --bedrock
 |------|-----------|
 | 트리에 값이 거의 안 잡힘 | 브라우저 접근성 트리 미노출 → 대상 창을 실제 포그라운드로. Chrome은 접근성 자동 활성; 안 되면 `--force-renderer-accessibility` |
 | `AmazonBedrockRuntimeException` AccessDenied | 모델 액세스 미승인 또는 IAM 권한 부족 → Bedrock 콘솔에서 모델 활성화, `bedrock:InvokeModel` 부여 |
-| 모델 ID 오류 | 리전별 가용 모델 상이 → `list-foundation-models`로 확인 후 `Aws:BedrockModelId` 교체 |
+| `ResourceNotFoundException` / "Legacy" / on-demand 불가 | base 모델 ID 사용이 원인 → **inference profile ID(`us.`/`global.`)로 교체** (`list-inference-profiles`) |
+| 모델 ID 오류 | 리전별 가용 모델·프로파일 상이 → `list-inference-profiles`로 확인 후 `Aws:BedrockModelId` 교체 |
 | FlaUI 관련 빌드 경고 | `net8.0-windows` 타깃·Windows에서 빌드 확인 |
