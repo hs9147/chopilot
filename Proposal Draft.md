@@ -3,8 +3,18 @@
 
 > **Screen을 이해하는 AI를 넘어 Business를 이해하는 AI**
 
-Version : 1.0  
-Status : Proposal
+Version : 1.1  
+Status : Proposal  
+연계 : 상세 설계는 [ARCHITECTURE.md](ARCHITECTURE.md) 참조
+
+---
+
+## 0. 개정 이력
+
+| Version | 변경 |
+|---------|------|
+| 1.0 | 최초 제안 |
+| 1.1 | 배포 형상 확정(**AWS + VDI 내부 데스크톱 앱**), 데이터 거버넌스·워크플로 안전장치·성공 지표(KPI) 추가, 위험검증 Phase 0 신설 |
 
 ---
 
@@ -274,6 +284,14 @@ Semantic Data로 처리한다.
 ---
 
 ## Observation
+
+관측은 소스 통제 수준에 따라 3계층으로 운영한다.
+
+- **Tier 1 (UIA)** — 접근성 트리 파싱 → **자체 Procurement 1차 적용** (소스 접근 불가, 사용자 관점 관측)
+- **Tier 2 (Vision/OCR)** — 픽셀 폴백·검증
+- **Tier 0 (Cooperative)** — 향후 소스 협조 가능 시 계측으로 고정확 방출(현재 미적용)
+
+환경이 **동적으로 구성**되므로 매핑을 하드코딩하지 않고 **런타임 AI(Bedrock) 해석 + 자가학습 캐시 + 화면변경 자가치유**로 적응한다(Adaptive Semantic Mapping). 사내 시스템이므로 확보 가능한 **화면 명세·테스트 환경·도메인 전문가**는 AI의 few-shot 시드·검수 기준으로 활용한다.
 
 ### UI Automation
 
@@ -656,6 +674,58 @@ Project
 
 ---
 
+# 10-1. 사용자별 개인화 (환경·로직 축적·도출)
+
+사용자마다
+
+환경(앱·화면·데이터·습관)이
+
+다르다.
+
+Cho-Pilot은
+
+사용자별로
+
+환경과 로직을 축적하고
+
+그 환경에 맞는 로직을 도출한다.
+
+## 2-Plane 지식 모델
+
+- **Shared Structural Plane** (전역/조직 공유)
+  - 화면 → 개념 매핑 (구조 지식, 사적 정보 아님)
+  - 신규 사용자 콜드스타트에 재사용
+
+- **Personal Adaptive Plane** (사용자별 격리)
+  - 자주 쓰는 화면·빈도
+  - 개인 엔티티 별칭 (예: 거래처 약어)
+  - 워크플로 습관
+  - 선호·보정 이력
+
+## 로직 도출
+
+```
+개인 ▷ 조직 ▷ 전역
+```
+
+순으로 병합해
+
+현재 환경에 맞는
+
+매핑 / 다음작업 / 자동화 후보
+
+를 도출한다.
+
+사용자가 수락·수정·거부한 피드백을 축적해
+
+개인 레이어가
+
+그 사용자의 방식에 수렴한다.
+
+개인 정보는 사용자별로 격리한다.
+
+---
+
 # 11. Workflow Engine
 
 Workflow
@@ -664,7 +734,11 @@ Guide
 
 ↓
 
-Validation
+Validation (Dry-run)
+
+↓
+
+**Human Approval** (기본값)
 
 ↓
 
@@ -672,49 +746,66 @@ Automation
 
 ↓
 
-Approval
+Verify (결과 확인)
 
 ↓
 
-History
+Audit (불변 로그)
+
+## 안전장치
+
+- 기본값은 **사전 승인(Human-in-the-loop)**. 신뢰도 누적 후 저위험 액션만 단계적 자동화
+- 모든 자동화 실행은 **불변 Audit Log**(CloudTrail + 감사테이블)
+- **롤백 규칙 + 전역 Kill Switch** 필수
+- 실행 권한은 관측과 분리된 별도 경로/권한
 
 ---
 
 # 12. 기술 구성
 
-## Client
+## 배포 형상 (확정)
+
+- 추론/데이터 플랫폼 : **AWS** (모든 데이터 테넌트 VPC 내부)
+- 관측 대상 환경 : **영속(persistent) VDI 세션 내부에서 동작하는 데스크톱 앱** (사용자별 계정 유지)
+  - 에이전트가 VDI 세션 안에서 실행 → 내부 앱의 **UI Automation 트리 정상 접근** (VDI 픽셀-only 한계 해소)
+  - 계정 유지 → 로컬 durable 스풀·캐시 신뢰 가능 (오프라인·재시도 내성)
+  - 남은 제약 : VDI GPU 부재 → 무거운 추론(OCR·임베딩·Vision)은 서버로, **클라이언트는 초경량(관측 전용)** 유지
+
+## Client (VDI 내부, .NET 8)
 
 Windows UI Automation
 
-Vision
+Microsoft Graph (Mail, 우선)
 
-OCR
+Outlook COM (fallback)
 
-OpenCV
+File Watcher
 
-ONNX Runtime
+Local Privacy Gate (PII 마스킹, 경량)
 
-Outlook COM
-
-Microsoft Graph
-
-Office Parser
+> OCR·임베딩·Vision은 GPU 부재로 서버에서 수행 (스크린샷 필요 시에만 캡처→전송)
 
 ---
 
-## Server
+## Server (AWS, Tenant VPC)
 
-LLM
+LLM : **Amazon Bedrock (Claude)**
 
-Embedding
+Embedding : Bedrock (Titan / Cohere)
 
-Knowledge Graph
+Vector Store : Aurora PostgreSQL + pgvector (→ 규모 시 OpenSearch)
 
-Workflow Engine
+Knowledge Graph : Aurora PostgreSQL (→ 규모 시 Neptune)
 
-Semantic Search
+Storage : S3 (SSE-KMS 암호화)
 
-Memory
+Semantic Engine / Entity Resolver
+
+Business Understanding Service
+
+Workflow Engine (Step Functions)
+
+관측성/보안 : CloudWatch, KMS, IAM, VPC Endpoint, CloudTrail
 
 ---
 
@@ -743,6 +834,35 @@ Cho-Pilot은
 
 ---
 
+# 13-1. 데이터 거버넌스
+
+관측 *방법*뿐 아니라 관측한 *데이터*의 처리도 통제한다.
+
+| 영역 | 정책 |
+|------|------|
+| 전송 경계 | 모든 데이터 테넌트 VPC 내부. Bedrock은 VPC Endpoint 경유(인터넷 미경유) |
+| LLM 데이터 | Bedrock 무학습 정책. 프롬프트/응답 로그 보존기간·암호화 |
+| 저장 | S3/Aurora SSE-KMS 암호화, 전송 TLS/mTLS |
+| 최소수집 | Privacy Gate에서 PII 마스킹, 화이트리스트 필드만 승격 |
+| 동의/투명성 | 관측 범위 고지 UX, on/off·앱별 제외 |
+| 보존/파기 | 항목별 TTL, 사용자 삭제 요청 처리 경로 |
+| 접근/감사 | IAM 최소권한, 사용자별 격리, 전 액션 감사 |
+
+---
+
+# 13-2. 성공 지표 (KPI)
+
+| 지표 | 목표(초기) |
+|------|-----------|
+| 관측 정확도 (UI→Business Object) | ≥ 90% |
+| 연결 정밀도 (Entity Resolver) | Precision ≥ 0.9 |
+| 업무 인식 정확도 | ≥ 80% |
+| 자동화 성공률 | ≥ 95% |
+| 업무 판단 지연 (p95) | ≤ 3s |
+| 활성 사용자당 LLM 비용 | 예산 내 |
+
+---
+
 # 14. 라이선스
 
 | 구성요소 | License | 비용 |
@@ -763,6 +883,21 @@ LLM API 사용량이 대부분을 차지한다.
 ---
 
 # 15. 개발 단계
+
+> 최난도(융합·거버넌스)를 뒤로 미루지 않기 위해 **위험 검증 Phase 0**를 선행한다.
+
+## Phase 0 — 위험 검증 (4~6주)
+
+**1차 타깃 : 자체 개발 General Procurement 시스템** (소스 접근 불가, 사용자 관점 관측)
+
+- **UIA 관측 정확도 실측** — 핵심 화면 필드 매핑률 (최우선)
+- App Adapter 매핑 규칙 PoC
+- Local Privacy Gate 검증
+- Entity Resolver 결정론 매칭 검증
+
+→ UIA로 필드가 안 읽히면 이후 단계 무의미 → Phase 0에서 반드시 선검증
+
+---
 
 ## Phase 1
 
