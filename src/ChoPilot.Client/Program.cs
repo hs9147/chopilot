@@ -11,14 +11,17 @@ using Microsoft.Extensions.Configuration;
 //
 //   사용법:
 //     chopilot-dump [--out <파일>] [--delay <초>] [--baseline] [--bedrock]
+//                   [--upload [url]] [--spool-dir <경로>]
 //
 //   동작:
 //     1. --delay 초 대기 (그 사이 관측할 브라우저 화면을 포그라운드로)
-//     2. 포그라운드 창의 접근성 트리를 정규화 수집
-//     3. PrivacyGate 적용(마스킹) → 화면 서명 계산
+//     2. 포그라운드 창의 접근성 트리를 정규화 수집 + 화면/레코드 식별(ScreenIdentifier)
+//     3. ConsentPolicy(on/off·앱별 제외) → PrivacyGate(마스킹) → 화면 서명 계산
 //     4. --baseline : StubAiMapper(alias) 매핑 시도 (대조군)
 //        --bedrock  : Bedrock 동적 매핑 시도 (실 AI, appsettings 설정 사용)
 //        --upload [url] : 서버로 POST 후 Guide 조회 (기본 Server:IngestionEndpoint)
+//                         전송 실패 시 durable 스풀에 적재, 다음 실행에서 재전송
+//        --spool-dir    : 스풀 디렉터리 지정 (기본 <실행경로>/spool)
 //     5. ObservationEvent JSON을 stdout + (옵션)파일로 출력
 //
 //   설정: appsettings.json → appsettings.local.json → 환경변수(CHOPILOT_*) 순 오버라이드
@@ -35,6 +38,14 @@ if (opts.Delay > 0)
 
 using var observer = new UiaObserver();
 var (screen, rawTree) = observer.CaptureForegroundWindow(cfg.Observation.MaxDepth, cfg.Observation.MaxNodes);
+
+// 관측 동의·범위 게이트 (전역 on/off + 앱별 제외). 미허용 시 관측·전송하지 않는다.
+var consent = new ConsentPolicy(cfg.Consent).Evaluate(screen);
+if (!consent.Allowed)
+{
+    Console.Error.WriteLine($"[chopilot-dump] 관측 중단 — {consent.Reason}");
+    return 0;
+}
 
 var gate = new PrivacyGate(policyVersion: cfg.Privacy.PolicyVersion);
 var (maskedTree, maskedRefs) = gate.Apply(rawTree);
@@ -59,8 +70,16 @@ if (opts.Upload)
 {
     var url = opts.UploadUrl
         ?? (string.IsNullOrWhiteSpace(cfg.Server.IngestionEndpoint) ? "http://127.0.0.1:5080" : cfg.Server.IngestionEndpoint);
-    Console.Error.WriteLine($"[chopilot-dump] upload → {url}");
+    var spoolDir = opts.SpoolDir ?? Path.Combine(AppContext.BaseDirectory, "spool");
+    var spool = new EventSpool(spoolDir);
+    Console.Error.WriteLine($"[chopilot-dump] upload → {url} (spool: {spoolDir}, 대기 {spool.PendingCount})");
     using var uploader = new Uploader(url);
+
+    // 1) 서버 복구 시 밀린 스풀을 오래된 순으로 먼저 재전송
+    var drained = await spool.DrainAsync(e => uploader.TryPostObservationAsync(e));
+    if (drained > 0) Console.Error.WriteLine($"[chopilot-dump] spool 재전송 {drained}건");
+
+    // 2) 현재 이벤트 전송 — 실패(서버 장애·오프라인) 시 durable 스풀에 적재해 유실 방지
     try
     {
         Console.Error.WriteLine("[chopilot-dump] ingest: " + await uploader.PostObservationAsync(evt));
@@ -68,7 +87,8 @@ if (opts.Upload)
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"[chopilot-dump] upload 실패: {ex.Message}");
+        spool.Enqueue(evt);
+        Console.Error.WriteLine($"[chopilot-dump] upload 실패 → 스풀 적재(대기 {spool.PendingCount}): {ex.Message}");
     }
 }
 
@@ -143,6 +163,7 @@ static Options ParseArgs(string[] args)
                 o.Upload = true;
                 if (i + 1 < args.Length && !args[i + 1].StartsWith("--")) o.UploadUrl = args[++i];
                 break;
+            case "--spool-dir" when i + 1 < args.Length: o.SpoolDir = args[++i]; break;
         }
     }
     return o;
@@ -156,4 +177,5 @@ sealed class Options
     public bool Bedrock { get; set; }
     public bool Upload { get; set; }
     public string? UploadUrl { get; set; }
+    public string? SpoolDir { get; set; }
 }

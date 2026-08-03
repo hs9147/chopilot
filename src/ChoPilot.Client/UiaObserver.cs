@@ -34,10 +34,12 @@ public sealed class UiaObserver : IDisposable
         var count = 0;
         var tree = Serialize(window, 0, maxDepth, maxNodes, ref count);
 
+        var url = TryGetUrl(window);
+        var title = Prop(() => window.Properties.Name.ValueOrDefault);
         var screen = new ScreenInfo(
-            Url: TryGetUrl(window),
-            Title: Prop(() => window.Properties.Name.ValueOrDefault),
-            RecordHint: null); // 레코드 식별(URL 파싱)은 ScreenIdentifier 단계
+            Url: url,
+            Title: title,
+            RecordHint: ScreenIdentifier.Identify(url, title)); // H2 레코드 식별
 
         return (screen, tree);
     }

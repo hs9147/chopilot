@@ -30,12 +30,18 @@
 
 ```
 src/
-  ChoPilot.Core/       모델, SignatureService, PrivacyGate, Ontology   (net8.0, 크로스플랫폼)
+  ChoPilot.Core/       모델, SignatureService, PrivacyGate, Ontology,
+                       ScreenIdentifier(레코드 식별), ConsentPolicy(on/off·제외),
+                       EventSpool(durable 재전송 스풀)                 (net8.0, 크로스플랫폼)
   ChoPilot.Mapping/    MappingCache, MappingResolver, StubAiMapper,
-                       BedrockAiMapper, PromptBuilder                  (net8.0)
-  ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
+                       BedrockAiMapper, PromptBuilder,
+                       BusinessObjectBuilder, GuideService             (net8.0)
+  ChoPilot.Client/     UiaObserver + Uploader + chopilot-dump CLI      (net8.0-windows, FlaUI)
+  ChoPilot.Server/     Ingestion + Guide + Audit (읽기전용 API)        (net8.0, ASP.NET)
 tests/
-  ChoPilot.Tests/      Signature/Privacy/Stub/BedrockParse 단위테스트   (net8.0, 크로스플랫폼)
+  ChoPilot.Tests/      Signature/Privacy/Stub/Bedrock/Guide +
+                       ScreenIdentifier/Consent/EventSpool/Resolver +
+                       Server end-to-end (WebApplicationFactory)       (net8.0, 크로스플랫폼)
 ```
 
 ### 빌드
@@ -43,10 +49,10 @@ tests/
 솔루션 파일 `ChoPilot.sln`은 저장소에 포함되어 있다.
 
 ```bash
-dotnet build         # net8.0 3개 + net8.0-windows 클라이언트
-dotnet test          # Windows/AWS 불요 — 순수 로직 6개 검증 (전부 통과 확인됨)
+dotnet build         # net8.0 4개(Core/Mapping/Server/Tests) + net8.0-windows 클라이언트
+dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 21개 검증
 ```
-> .NET 8 SDK 8.0.423 + Windows에서 빌드 0 경고 / 0 오류, 테스트 6/6 통과 검증 완료.
+> .NET 8 SDK 8.0.423 + Windows에서 빌드 0 경고 / 0 오류, 테스트 21/21 통과 검증 완료.
 
 ### Phase 0 관측 도구 실행 (Windows)
 

@@ -11,6 +11,20 @@ public sealed class ChoPilotConfig
     public PrivacyConfig Privacy { get; set; } = new();
     public ObservationConfig Observation { get; set; } = new();
     public ServerConfig Server { get; set; } = new();
+    public ConsentConfig Consent { get; set; } = new();
+}
+
+/// <summary>사용자 동의·관측 범위 제어 (ARCHITECTURE §8, PHASE1-DESIGN Exit #4).</summary>
+public sealed class ConsentConfig
+{
+    /// <summary>관측 전역 on/off. false면 어떤 화면도 관측·전송하지 않는다.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>제외할 앱/창 (타이틀·프로세스명 부분일치, 대소문자 무시). 예: 개인 뱅킹·메신저.</summary>
+    public List<string> ExcludedApps { get; set; } = new();
+
+    /// <summary>제외할 URL 부분일치 패턴(대소문자 무시). 예: 사내 급여·건강 포털.</summary>
+    public List<string> ExcludedUrlPatterns { get; set; } = new();
 }
 
 public sealed class AwsConfig

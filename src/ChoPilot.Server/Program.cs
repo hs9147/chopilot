@@ -20,14 +20,16 @@ builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.PropertyNameC
 
 builder.Services.AddSingleton<IMappingCache, InMemoryMappingCache>();
 builder.Services.AddSingleton<ObservationStore>();
+builder.Services.AddSingleton<AuditService>();
 
 if (cfg.GetValue<bool>("UseBedrock"))
 {
     var region = RegionEndpoint.GetBySystemName(cfg["Aws:Region"] ?? "ap-northeast-2");
     builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ => new AmazonBedrockRuntimeClient(region));
+    // 현재 Anthropic 모델은 inference profile ID만 지원(ON_DEMAND base id → ResourceNotFoundException).
     builder.Services.AddSingleton<IAiMapper>(sp => new BedrockAiMapper(
         sp.GetRequiredService<IAmazonBedrockRuntime>(),
-        cfg["Aws:BedrockModelId"] ?? "anthropic.claude-3-5-sonnet-20240620-v1:0"));
+        cfg["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
 }
 else
 {
@@ -45,7 +47,7 @@ var app = builder.Build();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/v1/observations",
-    async (ObservationEvent evt, MappingResolver resolver, ObservationStore store) =>
+    async (ObservationEvent evt, MappingResolver resolver, ObservationStore store, AuditService audit) =>
 {
     var signature = SignatureService.Compute(evt.Screen, evt.Tree);
     var hint = BusinessHint.FromScreen(evt.Screen);
@@ -55,6 +57,7 @@ app.MapPost("/v1/observations",
     var bo = BusinessObjectBuilder.Build(res.Entry, evt.Tree);
 
     store.Put(evt.EventId, evt, res.Entry, bo);
+    audit.Record(evt, signature, res.Entry, res.CacheHit);   // 불변 감사(Exit #4)
 
     return Results.Ok(new
     {
@@ -75,4 +78,11 @@ app.MapGet("/v1/guide", (string observation_id, ObservationStore store) =>
         : Results.Ok(GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject));
 });
 
+// 감사 로그 조회(읽기 전용). 운영은 접근통제(IAM) 하에 노출.
+app.MapGet("/v1/audit", (AuditService audit, int? limit) =>
+    Results.Ok(new { count = audit.Count, entries = audit.Snapshot(limit ?? 100) }));
+
 app.Run();
+
+// 통합 테스트에서 WebApplicationFactory로 참조하기 위한 partial 선언.
+public partial class Program { }

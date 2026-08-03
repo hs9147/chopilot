@@ -23,6 +23,17 @@ public sealed class Uploader : IDisposable
         return $"{(int)resp.StatusCode} {body}";
     }
 
+    /// <summary>스풀 재전송용: 성공(2xx) 여부만 반환하고 예외는 삼킨다(다음 기회 재시도).</summary>
+    public async Task<bool> TryPostObservationAsync(ObservationEvent evt, CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync("/v1/observations", evt, ct);
+            return resp.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
     public async Task<string> GetGuideAsync(string observationId, CancellationToken ct = default)
     {
         using var resp = await _http.GetAsync(
