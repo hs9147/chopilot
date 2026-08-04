@@ -126,7 +126,8 @@ resolve(signature, user_id):
   "fields": { "Material": "M-001", "Quantity": null },   // 마스킹 필드는 제외
   "progress": { "filled": 3, "required": 5, "ratio": 0.6 },
   "next_hints": [
-    { "type": "guide", "text": "수량·납기 입력이 남았습니다", "actionable": false }
+    { "id": "sg:9c4e…", "type": "guide",       "subject": "Quantity", "text": "수량 입력이 남았습니다", "actionable": false },
+    { "id": "sg:a00a…", "type": "next_screen", "subject": "sha256:…", "text": "이 다음에는 보통 \"발주 목록\"(으)로 이동합니다 (4회, 약 35초 후)", "actionable": false }
   ],
   "confidence": 0.92,
   "provenance": "cache | ai"
@@ -134,13 +135,39 @@ resolve(signature, user_id):
 ```
 > Phase 1의 `next_hints[].actionable`는 항상 `false`(가이드만). 자동화는 Phase 4.
 
+- **`type: "guide"`** 는 지금 화면 안의 빈칸을 가리킨다. 화면 하나만 보면 여기까지다.
+- **`type: "next_screen"`** 은 UEP 전이 그래프에서 나온다(§5) — 그 화면을 떠난 뒤의 **다음 작업**.
+  2회 이상 관측된 경로만 제안한다(한 번 간 길은 흐름이 아니라 우연).
+- **`id`** 는 (업무객체, 종류, 대상)에서 결정적으로 유도한 제안의 **정체성**이다. 렌더마다 새로 뽑지
+  않는다 — 측정 대상이 "이 렌더가 클릭됐는가"가 아니라 "이 제안이 쓸모 있는가"이기 때문이다.
+- 조회 시점에 **노출(impression)** 이 기록된다(수락률의 분모). 같은 관측을 재조회해도 분모는 늘지 않고
+  이미 내려진 판단도 덮이지 않는다.
+
+### 4.4 제안 판단 — `POST /v1/suggestions/feedback` (Client → Server)
+```jsonc
+// 헤더: X-ChoPilot-User: <userId>   ← 사용자는 본문에 없다
+{ "observationId": "…", "suggestionId": "sg:a00a…", "outcome": "accepted | rejected" }
+```
+- **무시는 보고하지 않는다** — 판단의 부재가 곧 무시다(`pending`). 무시를 거부로 세면
+  "제안이 틀렸다"와 "사용자가 바빴다"가 한 숫자에 섞인다.
+- 보여준 적 없는 제안은 `404`. 분모 없는 분자는 KPI를 무의미하게 만든다.
+- 집계는 `GET /v1/suggestions` — **수락률**(명시적 판단 중 수락)과 **응답률**(노출 중 판단)을 분리해 낸다.
+
 ---
 
 ## 5. 데이터 모델 (개인화 선반영)
 
 - **매핑 캐시 엔트리**: [PHASE0-KIT.md](PHASE0-KIT.md) §3.1 구조 재사용 — `signature`·**`scope`**·**`user_id`**·`mapping[]`·`confidence`·`status`.
 - **Business Object**: [ARCHITECTURE.md](ARCHITECTURE.md) §4.2.
-- **UEP(Phase 1 최소)**: `user_id` → { 화면 사용 빈도/최근성, 개인 보정 매핑 }. 도출 로직은 Phase 3에서 본격화, Phase 1은 **축적만**.
+- **UEP(Phase 1)**: `user_id` → { 화면 사용 빈도/최근성, **화면 전이 그래프**, 개인 보정 매핑 }.
+  - **전이** `(from → to, count, medianGapSeconds, lastSeen)` — "무엇 다음에 무엇을 하는가". 빈도만으로는
+    다음 작업을 말할 수 없어서 따로 쌓는다. 세 가지를 걸러낸다:
+    **자기루프**(클라이언트가 한 화면을 여러 번 보낸 것은 이동이 아니다),
+    **긴 공백**(기본 30분 초과는 업무 순서가 아니라 자리 비움),
+    **평균**(세션 안의 딴짓 한 번이 흐름을 규정하지 못하게 중앙값을 쓴다. 표본은 엣지당 최근 64개).
+  - **판단 기록** `(사용자, 관측, 제안) → 노출 · 수락/거부` — §4.4. 거부가 신호다. 수락만 모으면
+    이미 맞은 제안만 확인하게 된다.
+- 도출은 Phase 3에서 본격화하되, **다음 화면 제안**(§4.3 `next_screen`)은 Phase 1에서 이미 전이 그래프로 낸다.
 
 ---
 

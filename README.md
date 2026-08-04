@@ -89,8 +89,9 @@ dotnet run --project src/ChoPilot.Server -c Release -- --Mapping:ThetaHigh=0.5
 | ① 스냅샷 적재 (드래그&드롭 재생) | — |
 | ② 지표 (통과선 대비 PASS/FAIL) | H3b 적중률 · H6 지연·토큰 |
 | ③ 서명 진단 (갈린 route 경고) | H3b 원인 |
-| ④ 스냅샷별 상세 (인벤토리·식별·마스킹) | H1 · H2 · H4 |
-| ⑤ 채점 &amp; 리포트 (Markdown/JSON) | 종합 Go/No-Go |
+| ④ 검수 큐 &amp; 보정 (저신뢰 매핑 정정·승격) | H3b 해소 |
+| ⑤ 스냅샷별 상세 (인벤토리·식별·마스킹) | H1 · H2 · H4 |
+| ⑥ 채점 &amp; 리포트 (Markdown/JSON) | 종합 Go/No-Go |
 
 ### 측정 API (자동화용)
 
@@ -108,11 +109,17 @@ curl localhost:5080/v1/observations  # 스냅샷 목록 + 인벤토리 집계
 | `distinctSignatures` | 같은 화면이 여러 서명으로 갈라졌는지 진단 | 화면 수와 일치 |
 | `latencyP95Ms` | H6 관측→Guide p95 | ≤ 3000 |
 | `aiCalls` / `inputTokens` / `outputTokens` | H6 매핑당 AI 비용 | 예산 내 |
+| `deferredReuses` | 저신뢰 캐시 재사용(재추론 백오프로 아낀 호출) | — |
 | `maskedRefs` | H4 마스킹 적용량 | — |
 
 > **주의:** `StubAiMapper`의 필드 신뢰도는 0.6이라 기본 `Mapping:ThetaHigh=0.8`에서는 매핑이
 > `pending_review`로 남아 **캐시가 절대 적중하지 않는다**(`cacheHitRatio`가 항상 0).
 > 캐시 경로를 보려면 `--bedrock`(실 AI)을 쓰거나 `Mapping:ThetaHigh`를 낮춘다.
+
+> **`cache_hit=false`와 "AI를 호출했다"는 다른 말이다.** 저신뢰 매핑은 자기 신뢰도로 적중 조건을
+> 만족시킬 수 없지만(θ 절벽) 매 관측마다 다시 묻지도 않는다(재추론 백오프, `Mapping:ReinferAfterHours`
+> 기본 24h). 관측 응답의 `source`가 셋을 구분한다 — `trusted_cache` / `deferred_cache` / `ai`.
+> `aiCalls`는 `ai`만 센다. 백오프를 끄고 순수 호출량을 재려면 `--Mapping:ReinferAfterHours=0`.
 
 가설별 측정 절차·채점 기준·함정은 **[PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md)** 에 있다.
 스냅샷을 서버로 재생하면 Windows 없이도 H3b·H6를 반복 측정할 수 있다.
@@ -120,12 +127,12 @@ curl localhost:5080/v1/observations  # 스냅샷 목록 + 인벤토리 집계
 ### 개인화 · 검수(HITL) API
 
 2-Plane 지식 모델(D5, ARCHITECTURE §5.4)과 저신뢰 매핑 검수(§5.2 step 6).
-Phase 1은 **축적과 보정까지** — 개인화 도출(다음작업·자동화)은 Phase 3.
 
 ```bash
 U="X-ChoPilot-User: alice"
 
-curl -H "$U" localhost:5080/v1/uep          # 내 화면 사용 빈도/최근성 (UEP)
+curl -H "$U" localhost:5080/v1/uep          # 내 화면 사용 빈도·최근성 + 화면 전이 그래프 (UEP)
+curl        localhost:5080/v1/ontology      # 보정 폼이 쓸 개념 목록(별칭 포함)
 curl        localhost:5080/v1/review        # 검수 큐 (pending_review, 개인 스코프 제외)
 curl -H "$U" -X POST localhost:5080/v1/review/promote -d '{...}'  # 검수 통과 → trusted
 curl -H "$U" -X POST localhost:5080/v1/correction     -d '{...}'  # 개인 보정
@@ -142,6 +149,25 @@ curl        localhost:5080/v1/decisions     # 승격·보정 결정 이력 (누�
 > 개인 스코프의 읽기·쓰기가 본문·쿼리가 아닌 **한 곳(`RequestUser`)만 통과**하도록 좁혀 둔
 > 자리이며, 실제 인증(mTLS/OIDC)이 들어갈 seam이다. 그때까지 이 서버를 신뢰 경계 밖에
 > 노출하면 안 된다(ARCHITECTURE §8: VPC 내부, mTLS).
+
+### 다음 작업 제안 · 판단 수집 API
+
+가이드는 화면 안의 빈칸(`type: guide`)뿐 아니라 **그 화면을 떠난 뒤의 다음 작업**(`type: next_screen`)도
+제안한다. 후자는 UEP 화면 전이 그래프에서 나오며 2회 이상 관측된 경로만 쓴다.
+
+```bash
+curl "localhost:5080/v1/guide?observation_id=<id>"     # 제안 조회 (조회 시점에 '노출' 기록)
+curl -H "$U" -X POST localhost:5080/v1/suggestions/feedback \
+     -d '{"observationId":"<id>","suggestionId":"sg:…","outcome":"accepted"}'
+curl        localhost:5080/v1/suggestions              # 수락률·응답률 집계
+```
+
+- 제안 ID는 **(업무객체, 종류, 대상)에서 결정적으로** 유도된다. 렌더마다 난수를 발급하면 세션·사용자를
+  가로지르는 집계가 불가능해지고 수락률이 화면 새로고침 횟수의 함수가 된다.
+- **무시는 보고하지 않는다** — 판단의 부재가 곧 무시다. `acceptanceRate`는 명시적 판단 중 수락 비율,
+  `responseRate`는 노출 중 판단이 달린 비율이다. 둘을 섞으면 "제안이 틀렸다"와 "사용자가 바빴다"가
+  한 숫자가 된다.
+- 보여준 적 없는 제안에 대한 판단은 **404**. 분모 없는 분자는 KPI를 무의미하게 만든다.
 
 ### Bedrock 동적 매핑
 
