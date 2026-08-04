@@ -1,5 +1,7 @@
 # Cho-Pilot
 
+[![CI](https://github.com/hs9147/chopilot/actions/workflows/ci.yml/badge.svg)](https://github.com/hs9147/chopilot/actions/workflows/ci.yml)
+
 **Enterprise Work Intelligence Platform** — Screen을 이해하는 AI를 넘어 Business를 이해하는 AI.
 
 세 축(Web · Mail · Document)의 업무 신호를 통합해 현재 업무·목적·진행률·다음 작업을 실시간으로 이해한다.
@@ -12,6 +14,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 상세 아키텍처 설계 (전제 D1~D5, 컴포넌트, 데이터모델, Adaptive Mapping, 개인화) |
 | [PHASE0-PLAN.md](PHASE0-PLAN.md) | Phase 0 위험 검증 실행계획 |
 | [PHASE0-KIT.md](PHASE0-KIT.md) | Phase 0 실행 키트 (템플릿·스키마·측정표) |
+| [PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md) | **Phase 0 실측 가이드** (가설별 절차·명령·함정) |
 | [PHASE1-DESIGN.md](PHASE1-DESIGN.md) | Phase 1 상세 설계 (Web Agent + Guide, 읽기 전용) |
 | [SETUP.md](SETUP.md) | 개발환경 설정 (요구사항·빌드·설정·AWS 자격증명·실행·트러블슈팅) |
 
@@ -32,16 +35,19 @@
 src/
   ChoPilot.Core/       모델, SignatureService, PrivacyGate, Ontology,
                        ScreenIdentifier(레코드 식별), ConsentPolicy(on/off·제외),
-                       EventSpool(durable 재전송 스풀)                 (net8.0, 크로스플랫폼)
+                       EventSpool(durable 재전송 스풀),
+                       Uploader + ObservationDispatcher(전송·스풀 정책) (net8.0, 크로스플랫폼)
   ChoPilot.Mapping/    MappingCache, MappingResolver, StubAiMapper,
                        BedrockAiMapper, PromptBuilder,
                        BusinessObjectBuilder, GuideService             (net8.0)
-  ChoPilot.Client/     UiaObserver + Uploader + chopilot-dump CLI      (net8.0-windows, FlaUI)
-  ChoPilot.Server/     Ingestion + Guide + Audit (읽기전용 API)        (net8.0, ASP.NET)
+  ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
+  ChoPilot.Server/     Ingestion + Guide + Audit + Metrics (읽기전용 API)
+                       + wwwroot/ 측정 콘솔 (Phase 0 실측 UI)          (net8.0, ASP.NET)
 tests/
   ChoPilot.Tests/      Signature/Privacy/Stub/Bedrock/Guide +
                        ScreenIdentifier/Consent/EventSpool/Resolver +
-                       Server end-to-end (WebApplicationFactory)       (net8.0, 크로스플랫폼)
+                       Uploader/Dispatcher(전송 유실 방지) +
+                       Server end-to-end + Metrics                     (net8.0, 크로스플랫폼)
 ```
 
 ### 빌드
@@ -50,9 +56,10 @@ tests/
 
 ```bash
 dotnet build         # net8.0 4개(Core/Mapping/Server/Tests) + net8.0-windows 클라이언트
-dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 21개 검증
+dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 44개 검증
 ```
-> .NET 8 SDK 8.0.423 + Windows에서 빌드 0 경고 / 0 오류, 테스트 21/21 통과 검증 완료.
+> 빌드 0 경고 / 0 오류, 테스트 44/44 통과. Windows 클라이언트 포함 전체 솔루션 빌드는
+> [CI](.github/workflows/ci.yml)의 `build-windows` 잡에서 매 푸시마다 검증된다.
 
 ### Phase 0 관측 도구 실행 (Windows)
 
@@ -64,6 +71,49 @@ dotnet run --project src/ChoPilot.Client -- --delay 3 --out out/pr_create.snapsh
 
 - `--baseline` : StubAiMapper(alias 매칭)로 매핑 시도 → AI 매핑 대비 성능 대조군 (PHASE0-KIT §3.3)
 - 산출 JSON은 [PHASE0-KIT.md](PHASE0-KIT.md) §2(관측 인벤토리)·§3(매핑) 측정의 원자료
+
+### 측정 콘솔
+
+서버를 띄우고 **<http://localhost:5080/>** 를 열면 Phase 0 측정을 화면에서 진행할 수 있다.
+스냅샷을 끌어다 놓으면 재생되고, 지표·서명 진단·요소 인벤토리·채점·리포트 내려받기까지 한 화면에서 끝난다.
+
+```bash
+ASPNETCORE_URLS=http://127.0.0.1:5080 \
+dotnet run --project src/ChoPilot.Server -c Release -- --Mapping:ThetaHigh=0.5
+```
+
+| 콘솔 단계 | 다루는 가설 |
+|-----------|------------|
+| ① 스냅샷 적재 (드래그&드롭 재생) | — |
+| ② 지표 (통과선 대비 PASS/FAIL) | H3b 적중률 · H6 지연·토큰 |
+| ③ 서명 진단 (갈린 route 경고) | H3b 원인 |
+| ④ 스냅샷별 상세 (인벤토리·식별·마스킹) | H1 · H2 · H4 |
+| ⑤ 채점 &amp; 리포트 (Markdown/JSON) | 종합 Go/No-Go |
+
+### 측정 API (자동화용)
+
+서버는 감사 로그에서 지표를 직접 산출한다. PHASE0-KIT의 측정표를 손으로 채우는 대신 이 값을 쓴다.
+
+```bash
+curl localhost:5080/v1/metrics       # 적중률·지연·토큰 집계
+curl localhost:5080/v1/signatures    # route별 서명 그룹핑 (갈림 진단)
+curl localhost:5080/v1/observations  # 스냅샷 목록 + 인벤토리 집계
+```
+
+| 필드 | 대응 가설 | 통과선 |
+|------|----------|--------|
+| `cacheHitRatio` | H3b 자가학습 캐시 적중률 | ≥ 0.95 |
+| `distinctSignatures` | 같은 화면이 여러 서명으로 갈라졌는지 진단 | 화면 수와 일치 |
+| `latencyP95Ms` | H6 관측→Guide p95 | ≤ 3000 |
+| `aiCalls` / `inputTokens` / `outputTokens` | H6 매핑당 AI 비용 | 예산 내 |
+| `maskedRefs` | H4 마스킹 적용량 | — |
+
+> **주의:** `StubAiMapper`의 필드 신뢰도는 0.6이라 기본 `Mapping:ThetaHigh=0.8`에서는 매핑이
+> `pending_review`로 남아 **캐시가 절대 적중하지 않는다**(`cacheHitRatio`가 항상 0).
+> 캐시 경로를 보려면 `--bedrock`(실 AI)을 쓰거나 `Mapping:ThetaHigh`를 낮춘다.
+
+가설별 측정 절차·채점 기준·함정은 **[PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md)** 에 있다.
+스냅샷을 서버로 재생하면 Windows 없이도 H3b·H6를 반복 측정할 수 있다.
 
 ### Bedrock 동적 매핑
 

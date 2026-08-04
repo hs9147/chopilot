@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  # 크로스플랫폼 프로젝트(Core/Mapping/Server/Tests)만. 클라이언트는 net8.0-windows라 제외된다.
+  test:
+    name: Build & test (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore tests/ChoPilot.Tests/ChoPilot.Tests.csproj
+
+      - name: Build
+        run: dotnet build tests/ChoPilot.Tests/ChoPilot.Tests.csproj -c Release --no-restore -warnaserror
+
+      - name: Test
+        run: dotnet test tests/ChoPilot.Tests/ChoPilot.Tests.csproj -c Release --no-build --logger "console;verbosity=normal"
+
+  # UIA 관측 코드는 Windows에서만 컴파일된다 — 솔루션 전체를 빌드해 클라이언트 회귀를 잡는다.
+  build-windows:
+    name: Build solution (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build solution
+        run: dotnet build ChoPilot.sln -c Release -warnaserror
+
+      - name: Test
+        run: dotnet test tests/ChoPilot.Tests/ChoPilot.Tests.csproj -c Release --no-build

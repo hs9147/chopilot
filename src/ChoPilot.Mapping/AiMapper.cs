@@ -2,7 +2,14 @@ using ChoPilot.Core;
 
 namespace ChoPilot.Mapping;
 
-public sealed record MappingInference(string BusinessObject, List<FieldMapping> Fields);
+/// <summary>
+/// 추론 결과. 토큰 사용량은 실제 AI 호출에서만 채워진다(스텁·캐시는 null) — H6 비용 측정용.
+/// </summary>
+public sealed record MappingInference(
+    string BusinessObject,
+    List<FieldMapping> Fields,
+    int? InputTokens = null,
+    int? OutputTokens = null);
 
 /// <summary>캐시 미스 시 트리→개념 매핑을 추론 (ARCHITECTURE §5.2 step 4).</summary>
 public interface IAiMapper

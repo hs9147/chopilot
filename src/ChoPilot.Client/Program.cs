@@ -75,21 +75,16 @@ if (opts.Upload)
     Console.Error.WriteLine($"[chopilot-dump] upload → {url} (spool: {spoolDir}, 대기 {spool.PendingCount})");
     using var uploader = new Uploader(url);
 
-    // 1) 서버 복구 시 밀린 스풀을 오래된 순으로 먼저 재전송
-    var drained = await spool.DrainAsync(e => uploader.TryPostObservationAsync(e));
-    if (drained > 0) Console.Error.WriteLine($"[chopilot-dump] spool 재전송 {drained}건");
+    // 밀린 스풀 재전송 → 현재 이벤트 전송. 실패분은 유실 대신 스풀에 남는다.
+    var dispatch = await ObservationDispatcher.DispatchAsync(
+        spool, evt, e => uploader.TryPostObservationAsync(e));
 
-    // 2) 현재 이벤트 전송 — 실패(서버 장애·오프라인) 시 durable 스풀에 적재해 유실 방지
-    try
-    {
-        Console.Error.WriteLine("[chopilot-dump] ingest: " + await uploader.PostObservationAsync(evt));
+    if (dispatch.Drained > 0) Console.Error.WriteLine($"[chopilot-dump] spool 재전송 {dispatch.Drained}건");
+
+    if (dispatch.Sent)
         Console.Error.WriteLine("[chopilot-dump] guide : " + await uploader.GetGuideAsync(evt.EventId));
-    }
-    catch (Exception ex)
-    {
-        spool.Enqueue(evt);
-        Console.Error.WriteLine($"[chopilot-dump] upload 실패 → 스풀 적재(대기 {spool.PendingCount}): {ex.Message}");
-    }
+    else
+        Console.Error.WriteLine($"[chopilot-dump] 전송 실패 → 스풀 적재(대기 {dispatch.Pending})");
 }
 
 if (opts.Baseline)

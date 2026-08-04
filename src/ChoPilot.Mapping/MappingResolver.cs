@@ -21,7 +21,9 @@ public sealed class MappingResolver
         _thetaHigh = thetaHigh;
     }
 
-    public sealed record ResolveResult(MappingEntry Entry, bool CacheHit);
+    /// <summary>토큰 사용량은 캐시 HIT(=AI 미호출)일 때 null이다 — H6 비용 집계의 기준.</summary>
+    public sealed record ResolveResult(
+        MappingEntry Entry, bool CacheHit, int? InputTokens = null, int? OutputTokens = null);
 
     public async Task<ResolveResult> ResolveAsync(
         string signature, string userId, ScreenInfo screen, UiNode tree,
@@ -51,6 +53,6 @@ public sealed class MappingResolver
             Status: confidence >= _thetaHigh ? "trusted" : "pending_review");
 
         _cache.Put(entry);
-        return new ResolveResult(entry, CacheHit: false);
+        return new ResolveResult(entry, CacheHit: false, inference.InputTokens, inference.OutputTokens);
     }
 }
