@@ -60,8 +60,16 @@ public sealed class BedrockAiMapper : IAiMapper
             .GetProperty("text")
             .GetString() ?? "";
 
+        // usage는 응답 최상위에 온다 — 매핑 파싱 성공 여부와 무관하게 비용은 발생하므로 먼저 읽는다.
+        int? inputTokens = null, outputTokens = null;
+        if (doc.RootElement.TryGetProperty("usage", out var usage))
+        {
+            if (usage.TryGetProperty("input_tokens", out var it)) inputTokens = it.GetInt32();
+            if (usage.TryGetProperty("output_tokens", out var ot)) outputTokens = ot.GetInt32();
+        }
+
         var json = ExtractJson(text);
-        if (json is null) return new MappingInference(businessHint, new());
+        if (json is null) return new MappingInference(businessHint, new(), inputTokens, outputTokens);
 
         using var mapped = JsonDocument.Parse(json);
         var root = mapped.RootElement;
@@ -84,7 +92,7 @@ public sealed class BedrockAiMapper : IAiMapper
                     Sensitive: concept.Sensitive));
             }
         }
-        return new MappingInference(bo, fields);
+        return new MappingInference(bo, fields, inputTokens, outputTokens);
     }
 
     private static string? ExtractJson(string text)

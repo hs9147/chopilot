@@ -280,4 +280,31 @@ public class BedrockParseTests
         Assert.Equal("Material", inference.Fields[0].Concept);
         Assert.Equal("ai", inference.Fields[0].Provenance);
     }
+
+    [Fact]
+    public void Parse_ExtractsTokenUsage_ForCostMeasurement()
+    {
+        var body = """
+        {"content":[{"type":"text","text":"{\"business_object\":\"PurchaseRequest\",\"fields\":[]}"}],"usage":{"input_tokens":1234,"output_tokens":56}}
+        """;
+
+        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", ProcurementOntology.Concepts);
+
+        Assert.Equal(1234, inference.InputTokens);   // H6 매핑당 비용 산출의 원자료
+        Assert.Equal(56, inference.OutputTokens);
+    }
+
+    [Fact]
+    public void Parse_KeepsTokenUsage_EvenWhenModelReturnsNoJson()
+    {
+        // 매핑 파싱이 실패해도 토큰 비용은 이미 발생했다 — 집계에서 누락되면 안 된다.
+        var body = """
+        {"content":[{"type":"text","text":"죄송하지만 매핑할 수 없습니다."}],"usage":{"input_tokens":800,"output_tokens":12}}
+        """;
+
+        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", ProcurementOntology.Concepts);
+
+        Assert.Empty(inference.Fields);
+        Assert.Equal(800, inference.InputTokens);
+    }
 }

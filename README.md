@@ -66,6 +66,26 @@ dotnet run --project src/ChoPilot.Client -- --delay 3 --out out/pr_create.snapsh
 - `--baseline` : StubAiMapper(alias 매칭)로 매핑 시도 → AI 매핑 대비 성능 대조군 (PHASE0-KIT §3.3)
 - 산출 JSON은 [PHASE0-KIT.md](PHASE0-KIT.md) §2(관측 인벤토리)·§3(매핑) 측정의 원자료
 
+### 측정 (H3b · H6)
+
+서버는 감사 로그에서 지표를 직접 산출한다. PHASE0-KIT의 측정표를 손으로 채우는 대신 이 값을 쓴다.
+
+```bash
+curl localhost:5080/v1/metrics
+```
+
+| 필드 | 대응 가설 | 통과선 |
+|------|----------|--------|
+| `cacheHitRatio` | H3b 자가학습 캐시 적중률 | ≥ 0.95 |
+| `distinctSignatures` | 같은 화면이 여러 서명으로 갈라졌는지 진단 | 화면 수와 일치 |
+| `latencyP95Ms` | H6 관측→Guide p95 | ≤ 3000 |
+| `aiCalls` / `inputTokens` / `outputTokens` | H6 매핑당 AI 비용 | 예산 내 |
+| `maskedRefs` | H4 마스킹 적용량 | — |
+
+> **주의:** `StubAiMapper`의 필드 신뢰도는 0.6이라 기본 `Mapping:ThetaHigh=0.8`에서는 매핑이
+> `pending_review`로 남아 **캐시가 절대 적중하지 않는다**(`cacheHitRatio`가 항상 0).
+> 캐시 경로를 보려면 `--bedrock`(실 AI)을 쓰거나 `Mapping:ThetaHigh`를 낮춘다.
+
 ### Bedrock 동적 매핑
 
 `BedrockAiMapper`는 표준 AWS 자격증명 체인(환경변수/프로파일/IAM 역할)과 `InvokeModel`(Anthropic Messages)을 사용한다. 테넌트에서 가용한 모델 ID로 교체:

@@ -17,7 +17,30 @@ public sealed record AuditEntry(
     bool CacheHit,
     string Provenance,
     int MaskedRefCount,
-    string Status);
+    string Status,
+    double DurationMs,
+    int? InputTokens,
+    int? OutputTokens);
+
+/// <summary>
+/// H3b(캐시 적중률)·H6(지연 p95, AI 토큰비용) 집계 (PHASE0-KIT §3.4·§3.5, PHASE1-DESIGN §7).
+/// 측정표를 손으로 채우는 대신 감사 로그에서 직접 산출한다.
+/// </summary>
+public sealed record MetricsSnapshot(
+    int Observations,
+    int CacheHits,
+    int CacheMisses,
+    double CacheHitRatio,
+    int DistinctSignatures,
+    double LatencyP50Ms,
+    double LatencyP95Ms,
+    double LatencyMaxMs,
+    int AiCalls,
+    int InputTokens,
+    int OutputTokens,
+    int MaskedRefs,
+    Dictionary<string, int> ByProvenance,
+    Dictionary<string, int> ByStatus);
 
 /// <summary>
 /// 관측·판단 이력을 <b>추가 전용(append-only)</b>으로 남긴다 (PHASE1-DESIGN §2.2 AuditService).
@@ -29,8 +52,9 @@ public sealed class AuditService
     private long _seq;
 
     public AuditEntry Record(
-        ObservationEvent evt, string signature, MappingEntry entry, bool cacheHit)
+        ObservationEvent evt, string signature, MappingResolver.ResolveResult result, double durationMs)
     {
+        var entry = result.Entry;
         var e = new AuditEntry(
             Seq: Interlocked.Increment(ref _seq),
             At: DateTimeOffset.UtcNow,
@@ -40,10 +64,13 @@ public sealed class AuditService
             Signature: signature,
             BusinessObject: entry.BusinessObject,
             Confidence: entry.Confidence,
-            CacheHit: cacheHit,
+            CacheHit: result.CacheHit,
             Provenance: entry.Mapping.FirstOrDefault()?.Provenance ?? "cache",
             MaskedRefCount: evt.Privacy.MaskedRefs.Count,
-            Status: entry.Status);
+            Status: entry.Status,
+            DurationMs: durationMs,
+            InputTokens: result.InputTokens,
+            OutputTokens: result.OutputTokens);
         _log.Enqueue(e);
         return e;
     }
@@ -53,4 +80,38 @@ public sealed class AuditService
         _log.Reverse().Take(limit).ToList();
 
     public int Count => _log.Count;
+
+    /// <summary>전체 감사 로그에서 H3b·H6 지표를 산출.</summary>
+    public MetricsSnapshot Metrics()
+    {
+        var entries = _log.ToArray();
+        if (entries.Length == 0)
+            return new MetricsSnapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, new(), new());
+
+        var hits = entries.Count(e => e.CacheHit);
+        var durations = entries.Select(e => e.DurationMs).OrderBy(d => d).ToArray();
+
+        return new MetricsSnapshot(
+            Observations: entries.Length,
+            CacheHits: hits,
+            CacheMisses: entries.Length - hits,
+            CacheHitRatio: Math.Round((double)hits / entries.Length, 4),
+            DistinctSignatures: entries.Select(e => e.Signature).Distinct().Count(),
+            LatencyP50Ms: Math.Round(Percentile(durations, 0.50), 2),
+            LatencyP95Ms: Math.Round(Percentile(durations, 0.95), 2),
+            LatencyMaxMs: Math.Round(durations[^1], 2),
+            AiCalls: entries.Length - hits,                 // 캐시 미스 1건 = AI 호출 1회
+            InputTokens: entries.Sum(e => e.InputTokens ?? 0),
+            OutputTokens: entries.Sum(e => e.OutputTokens ?? 0),
+            MaskedRefs: entries.Sum(e => e.MaskedRefCount),
+            ByProvenance: entries.GroupBy(e => e.Provenance).ToDictionary(g => g.Key, g => g.Count()),
+            ByStatus: entries.GroupBy(e => e.Status).ToDictionary(g => g.Key, g => g.Count()));
+    }
+
+    /// <summary>정렬된 표본의 최근접 순위(nearest-rank) 백분위수.</summary>
+    private static double Percentile(double[] sorted, double p)
+    {
+        var rank = (int)Math.Ceiling(p * sorted.Length);
+        return sorted[Math.Clamp(rank - 1, 0, sorted.Length - 1)];
+    }
 }
