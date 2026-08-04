@@ -21,6 +21,9 @@ builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.PropertyNameC
 builder.Services.AddSingleton<IMappingCache, InMemoryMappingCache>();
 builder.Services.AddSingleton<ObservationStore>();
 builder.Services.AddSingleton<AuditService>();
+builder.Services.AddSingleton<UepStore>();
+builder.Services.AddSingleton<DecisionLog>();
+builder.Services.AddSingleton<PersonalizationService>();
 
 // 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
 builder.Services.AddSingleton(_ => new PrivacyGate(policyVersion: cfg["Privacy:PolicyVersion"] ?? "1.0"));
@@ -54,7 +57,8 @@ app.UseStaticFiles();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/v1/observations",
-    async (ObservationEvent evt, MappingResolver resolver, ObservationStore store, AuditService audit) =>
+    async (ObservationEvent evt, MappingResolver resolver, ObservationStore store,
+           AuditService audit, UepStore uep) =>
 {
     // 서명→매핑→BO 구간을 계측한다. 캐시 미스(=Bedrock 호출)와 HIT의 차이가 여기서 드러난다.
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -70,6 +74,9 @@ app.MapPost("/v1/observations",
 
     store.Put(evt.EventId, evt, res.Entry, bo);
     audit.Record(evt, signature, res, durationMs);   // 불변 감사(Exit #4) + 지표 원자료
+
+    // 개인화 축적(Exit ⑤, D5). 시각은 서버 수신 시각 — 클라이언트 시계에 좌우되면 안 된다.
+    uep.RecordVisit(evt.UserId, signature, DateTimeOffset.UtcNow);
 
     return Results.Ok(new
     {
@@ -123,6 +130,66 @@ app.MapGet("/v1/signatures", (ObservationStore store) =>
     var routes = MeasurementViews.DiagnoseRoutes(store.List());
     return Results.Ok(new { splitRoutes = routes.Count(r => r.Split), routes });
 });
+
+// ── 개인화 · HITL (D5, ARCHITECTURE §5.2 step 6 / §5.4) ─────────────────────
+// 개인 스코프의 읽기·쓰기는 요청 헤더의 사용자만 대상으로 한다. 본문·쿼리로 사용자를 받지 않는다.
+// RequestUser는 인증이 아니다 — 실제 인증이 들어갈 자리다(RequestUser.cs 참조).
+
+// 자기 UEP 조회 — 화면 사용 빈도/최근성(D5, Exit ⑤). 남의 프로파일은 조회할 수 없다.
+app.MapGet("/v1/uep", (HttpRequest request, UepStore uep) =>
+{
+    if (RequestUser.From(request) is not { } userId)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var profile = uep.Get(userId);
+    return profile is null
+        ? Results.NotFound(new { error = "no profile for user" })
+        : Results.Ok(profile);
+});
+
+// 검수 큐(HITL) — 저신뢰 매핑 열람. 개인 스코프는 제외된다.
+app.MapGet("/v1/review", (PersonalizationService svc, int? limit) =>
+    Results.Ok(new { entries = svc.ReviewQueue(limit ?? 100) }));
+
+// 검수 통과분을 trusted로 승격(HITL). 누가 승인했는지 결정 이력에 남긴다.
+app.MapPost("/v1/review/promote",
+    (HttpRequest request, PromoteRequest req, PersonalizationService svc, DecisionLog decisions) =>
+{
+    if (RequestUser.From(request) is not { } actor)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var promoted = svc.Promote(req);
+    if (promoted is null) return Results.NotFound(new { error = "unknown signature/scope" });
+
+    decisions.Record("promote", actor, promoted.Signature, promoted.Scope, promoted.Confidence,
+        $"{promoted.BusinessObject}: {promoted.Mapping.Count} fields");
+    return Results.Ok(promoted);
+});
+
+// 개인 보정 — 사용자 정정 매핑을 personal 스코프에 적재(피드백 루프, D5).
+app.MapPost("/v1/correction",
+    (HttpRequest request, CorrectionRequest req, PersonalizationService svc, DecisionLog decisions) =>
+{
+    if (RequestUser.From(request) is not { } userId)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var outcome = svc.ApplyCorrection(userId, req);
+    if (!outcome.Accepted)
+        return Results.BadRequest(new
+        {
+            error = "unknown concepts — 온톨로지 이름 또는 별칭만 허용된다",
+            unknownConcepts = outcome.UnknownConcepts,
+        });
+
+    var entry = outcome.Entry!;
+    decisions.Record("correction", userId, entry.Signature, entry.Scope, entry.Confidence,
+        $"{entry.BusinessObject}: {string.Join(", ", entry.Mapping.Select(m => m.Concept))}");
+    return Results.Ok(entry);
+});
+
+// 검수·보정 결정 이력(읽기 전용). 운영은 접근통제(IAM) 하에 노출.
+app.MapGet("/v1/decisions", (DecisionLog decisions, int? limit) =>
+    Results.Ok(new { count = decisions.Count, entries = decisions.Snapshot(limit ?? 100) }));
 
 app.Run();
 
