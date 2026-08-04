@@ -5,45 +5,165 @@ namespace ChoPilot.Server;
 
 /// <summary>
 /// User Environment Profile 저장소 (ARCHITECTURE §5.4 Personal Plane, PHASE1-DESIGN §5).
-/// 관측마다 (user_id, signature) 방문을 누적 → 사용 빈도·최근성. 사용자별 격리.
-/// PoC는 인메모리. 운영은 Aurora/별도 스토어(ARCHITECTURE §11).
+/// 관측마다 (user_id, signature) 방문을 누적 → 사용 빈도·최근성, 그리고 <b>화면 전이</b>.
+/// 사용자별 격리. PoC는 인메모리. 운영은 Aurora/별도 스토어(ARCHITECTURE §11).
 /// </summary>
 public sealed class UepStore
 {
-    // userId → (signature → usage)
-    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ScreenUsage>> _byUser = new();
+    /// <summary>
+    /// 세션 단절 기준. 이보다 긴 간격은 업무 흐름이 아니라 <b>자리 비움</b>이다.
+    /// 끊지 않으면 "구매요청 → (점심) → 발주조회"가 업무 순서로 학습된다.
+    /// </summary>
+    public static readonly TimeSpan DefaultSessionGap = TimeSpan.FromMinutes(30);
+
+    /// <summary>엣지당 보관하는 간격 표본 수. 중앙값은 최근 이만큼에서만 낸다(메모리 상한).</summary>
+    private const int GapSamples = 64;
 
     /// <summary>
-    /// 화면 방문 1회 기록. FirstSeen 보존, Count 증가, LastSeen 갱신.
+    /// 제안에 필요한 최소 관측 횟수. 한 번 간 길은 흐름이 아니라 우연이다.
+    /// </summary>
+    public const int DefaultMinTransitionCount = 2;
+
+    private readonly TimeSpan _sessionGap;
+    private readonly ConcurrentDictionary<string, UserState> _byUser = new();
+
+    public UepStore() : this(DefaultSessionGap) { }
+
+    public UepStore(TimeSpan sessionGap) => _sessionGap = sessionGap;
+
+    /// <summary>
+    /// 화면 방문 1회 기록. FirstSeen 보존, Count 증가, LastSeen 갱신,
+    /// 직전 화면이 있으면 전이 1건 누적.
     /// <para>
     /// <paramref name="at"/>는 <b>서버 수신 시각</b>을 넘겨라. 이벤트의 <c>CapturedAt</c>은
-    /// VDI 클라이언트가 보낸 값이라 시계가 틀어지면 빈도·최근성이 통째로 오염된다.
+    /// VDI 클라이언트가 보낸 값이라 시계가 틀어지면 빈도·최근성·전이 간격이 통째로 오염된다.
     /// </para>
     /// </summary>
-    public void RecordVisit(string userId, string signature, DateTimeOffset at)
+    public void RecordVisit(
+        string userId, string signature, DateTimeOffset at, string? route = null, string? title = null)
     {
-        var screens = _byUser.GetOrAdd(userId, _ => new());
-        screens.AddOrUpdate(
-            signature,
-            _ => new ScreenUsage(signature, 1, at, at),
-            (_, prev) => prev with
-            {
-                Count = prev.Count + 1,
-                FirstSeen = at < prev.FirstSeen ? at : prev.FirstSeen,
-                LastSeen = at > prev.LastSeen ? at : prev.LastSeen,
-            });
+        var state = _byUser.GetOrAdd(userId, _ => new UserState());
+
+        // 방문 누적과 전이 기록은 "직전 화면"을 함께 읽고 쓴다 → 사용자 단위 직렬화.
+        lock (state.Gate)
+        {
+            state.Screens[signature] = state.Screens.TryGetValue(signature, out var prev)
+                ? prev with
+                {
+                    Route = route ?? prev.Route,
+                    Title = title ?? prev.Title,
+                    Count = prev.Count + 1,
+                    FirstSeen = at < prev.FirstSeen ? at : prev.FirstSeen,
+                    LastSeen = at > prev.LastSeen ? at : prev.LastSeen,
+                }
+                : new ScreenUsage(signature, route, title, 1, at, at);
+
+            RecordEdge(state, signature, at, title);
+
+            state.LastSignature = signature;
+            state.LastAt = at;
+        }
     }
 
     /// <summary>사용자 프로파일 조회. 사용 빈도 내림차순(자주 쓰는 화면 우선).</summary>
     public UserEnvironmentProfile? Get(string userId)
     {
-        if (!_byUser.TryGetValue(userId, out var screens)) return null;
+        if (!_byUser.TryGetValue(userId, out var state)) return null;
 
-        var ordered = screens.Values
-            .OrderByDescending(s => s.Count)
-            .ThenByDescending(s => s.LastSeen)
-            .ToList();
+        lock (state.Gate)
+        {
+            var screens = state.Screens.Values
+                .OrderByDescending(s => s.Count)
+                .ThenByDescending(s => s.LastSeen)
+                .ToList();
 
-        return new UserEnvironmentProfile(userId, ordered);
+            var transitions = state.Edges
+                .Select(kv => Project(kv.Key.From, kv.Key.To, kv.Value))
+                .OrderByDescending(t => t.Count)
+                .ThenByDescending(t => t.LastSeen)
+                .ToList();
+
+            return new UserEnvironmentProfile(userId, screens, transitions);
+        }
+    }
+
+    /// <summary>
+    /// 이 화면 다음에 이어질 화면 후보. 빈도 내림차순 — 다음 작업 제안의 입력.
+    /// <paramref name="minCount"/> 미만은 근거가 얇아 제외한다.
+    /// </summary>
+    public IReadOnlyList<ScreenTransition> NextScreens(
+        string userId, string fromSignature, int limit = 3, int minCount = DefaultMinTransitionCount)
+    {
+        if (limit <= 0 || !_byUser.TryGetValue(userId, out var state))
+            return Array.Empty<ScreenTransition>();
+
+        lock (state.Gate)
+        {
+            return state.Edges
+                .Where(kv => kv.Key.From == fromSignature && kv.Value.Count >= minCount)
+                .Select(kv => Project(kv.Key.From, kv.Key.To, kv.Value))
+                .OrderByDescending(t => t.Count)
+                .ThenByDescending(t => t.LastSeen)
+                .Take(limit)
+                .ToList();
+        }
+    }
+
+    /// <summary>직전 화면에서 지금 화면으로의 전이를 누적. 호출자가 <see cref="UserState.Gate"/>를 잡고 있어야 한다.</summary>
+    private void RecordEdge(UserState state, string to, DateTimeOffset at, string? title)
+    {
+        if (state.LastSignature is not { } from) return;
+
+        // 같은 화면의 재관측은 이동이 아니다. 클라이언트는 한 화면을 여러 번 보내므로
+        // 자기 자신으로의 엣지를 남기면 모든 사용자의 그래프를 자기루프가 뒤덮는다.
+        if (from == to) return;
+
+        var gap = at - state.LastAt;
+        if (gap < TimeSpan.Zero || gap > _sessionGap) return;   // 순서 역전 / 자리 비움
+
+        if (!state.Edges.TryGetValue((from, to), out var edge))
+            state.Edges[(from, to)] = edge = new Edge();
+
+        edge.Count++;
+        edge.LastSeen = at;
+        edge.ToTitle = title ?? edge.ToTitle;
+
+        edge.Gaps.Enqueue(gap.TotalSeconds);
+        while (edge.Gaps.Count > GapSamples) edge.Gaps.Dequeue();
+    }
+
+    private static ScreenTransition Project(string from, string to, Edge edge) => new(
+        FromSignature: from,
+        ToSignature: to,
+        ToTitle: edge.ToTitle,
+        Count: edge.Count,
+        MedianGapSeconds: Math.Round(Median(edge.Gaps), 1),
+        LastSeen: edge.LastSeen);
+
+    private static double Median(IEnumerable<double> values)
+    {
+        var sorted = values.OrderBy(v => v).ToArray();
+        if (sorted.Length == 0) return 0;
+
+        var mid = sorted.Length / 2;
+        return sorted.Length % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+
+    /// <summary>한 사용자의 상태. 방문·전이·직전 화면을 한 잠금 아래 둔다.</summary>
+    private sealed class UserState
+    {
+        public readonly object Gate = new();
+        public readonly Dictionary<string, ScreenUsage> Screens = new();
+        public readonly Dictionary<(string From, string To), Edge> Edges = new();
+        public string? LastSignature;
+        public DateTimeOffset LastAt;
+    }
+
+    private sealed class Edge
+    {
+        public int Count;
+        public DateTimeOffset LastSeen;
+        public string? ToTitle;
+        public readonly Queue<double> Gaps = new();   // 최근 GapSamples개만
     }
 }

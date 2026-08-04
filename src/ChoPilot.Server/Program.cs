@@ -77,7 +77,9 @@ app.MapPost("/v1/observations",
     audit.Record(evt, signature, res, durationMs);   // 불변 감사(Exit #4) + 지표 원자료
 
     // 개인화 축적(Exit ⑤, D5). 시각은 서버 수신 시각 — 클라이언트 시계에 좌우되면 안 된다.
-    uep.RecordVisit(evt.UserId, signature, DateTimeOffset.UtcNow);
+    // route·title은 UEP를 사람이 읽을 수 있게 만든다: 해시만 남으면 다음작업 제안을 문장으로 쓸 수 없다.
+    uep.RecordVisit(evt.UserId, signature, DateTimeOffset.UtcNow,
+        SignatureService.NormalizeRoute(evt.Screen.Url), evt.Screen.Title);
 
     return Results.Ok(new
     {
@@ -90,12 +92,19 @@ app.MapPost("/v1/observations",
     });
 });
 
-app.MapGet("/v1/guide", (string observation_id, ObservationStore store, SuggestionFeedbackStore suggestions) =>
+app.MapGet("/v1/guide",
+    (string observation_id, ObservationStore store, SuggestionFeedbackStore suggestions, UepStore uep) =>
 {
     var rec = store.Get(observation_id);
     if (rec is null) return Results.NotFound(new { error = "unknown observation_id" });
 
     var guide = GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject);
+
+    // 화면 안의 빈칸 힌트 뒤에 "이 화면 다음에 무엇을 하는가"를 붙인다.
+    // 화면 하나만 보면 다음 '작업'이 아니라 다음 '입력칸'까지만 말할 수 있다(UEP 전이, D5).
+    var next = uep.NextScreens(rec.Event.UserId, rec.Entry.Signature, limit: 2)
+        .Select(t => GuideService.NextScreenHint(guide.BusinessObject, t));
+    guide = guide with { NextHints = guide.NextHints.Concat(next).ToList() };
 
     // 제안이 사용자에게 나갔다는 사실을 남긴다 — 수락률의 분모(ARCHITECTURE §9).
     // 사용자는 헤더가 아니라 관측이 정한다: 가이드는 그 관측을 만든 사람의 것이다.
