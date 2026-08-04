@@ -32,11 +32,12 @@
 src/
   ChoPilot.Core/       모델, SignatureService, PrivacyGate, Ontology,
                        ScreenIdentifier(레코드 식별), ConsentPolicy(on/off·제외),
-                       EventSpool(durable 재전송 스풀)                 (net8.0, 크로스플랫폼)
+                       EventSpool(durable 재전송 스풀),
+                       Uploader + ObservationDispatcher(전송·스풀 정책) (net8.0, 크로스플랫폼)
   ChoPilot.Mapping/    MappingCache, MappingResolver, StubAiMapper,
                        BedrockAiMapper, PromptBuilder,
                        BusinessObjectBuilder, GuideService             (net8.0)
-  ChoPilot.Client/     UiaObserver + Uploader + chopilot-dump CLI      (net8.0-windows, FlaUI)
+  ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
   ChoPilot.Server/     Ingestion + Guide + Audit (읽기전용 API)        (net8.0, ASP.NET)
 tests/
   ChoPilot.Tests/      Signature/Privacy/Stub/Bedrock/Guide +
