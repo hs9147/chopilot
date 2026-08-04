@@ -14,6 +14,7 @@
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 상세 아키텍처 설계 (전제 D1~D5, 컴포넌트, 데이터모델, Adaptive Mapping, 개인화) |
 | [PHASE0-PLAN.md](PHASE0-PLAN.md) | Phase 0 위험 검증 실행계획 |
 | [PHASE0-KIT.md](PHASE0-KIT.md) | Phase 0 실행 키트 (템플릿·스키마·측정표) |
+| [PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md) | **Phase 0 실측 가이드** (가설별 절차·명령·함정) |
 | [PHASE1-DESIGN.md](PHASE1-DESIGN.md) | Phase 1 상세 설계 (Web Agent + Guide, 읽기 전용) |
 | [SETUP.md](SETUP.md) | 개발환경 설정 (요구사항·빌드·설정·AWS 자격증명·실행·트러블슈팅) |
 
@@ -89,6 +90,9 @@ curl localhost:5080/v1/metrics
 > **주의:** `StubAiMapper`의 필드 신뢰도는 0.6이라 기본 `Mapping:ThetaHigh=0.8`에서는 매핑이
 > `pending_review`로 남아 **캐시가 절대 적중하지 않는다**(`cacheHitRatio`가 항상 0).
 > 캐시 경로를 보려면 `--bedrock`(실 AI)을 쓰거나 `Mapping:ThetaHigh`를 낮춘다.
+
+가설별 측정 절차·채점 기준·함정은 **[PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md)** 에 있다.
+스냅샷을 서버로 재생하면 Windows 없이도 H3b·H6를 반복 측정할 수 있다.
 
 ### Bedrock 동적 매핑
 
