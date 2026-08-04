@@ -64,7 +64,8 @@ curl -s http://127.0.0.1:5080/health     # {"status":"ok"}
 
 | # | 함정 | 증상 | 대응 |
 |---|------|------|------|
-| **T1** | `StubAiMapper`의 필드 신뢰도는 **0.6**인데 기본 `Mapping:ThetaHigh`는 **0.8** | 매핑이 항상 `pending_review`로 남아 **`cacheHitRatio`가 구조적으로 0** | 스텁으로 캐시를 측정하려면 위처럼 `--Mapping:ThetaHigh=0.5`. 실제 값을 재려면 `UseBedrock=true` |
+| **T1** | `StubAiMapper`의 필드 신뢰도는 **0.6**인데 기본 `Mapping:ThetaHigh`는 **0.8** | 매핑이 항상 `pending_review`로 남아 **`cacheHitRatio`가 구조적으로 0** (AI 재호출 자체는 백오프가 막지만 적중률은 0 그대로) | 스텁으로 캐시를 측정하려면 위처럼 `--Mapping:ThetaHigh=0.5`. 실제 값을 재려면 `UseBedrock=true` |
+| **T1b** | 재추론 백오프(`Mapping:ReinferAfterHours`, 기본 **24h**) | 저신뢰 매핑을 재사용하므로 `aiCalls`가 관측 수보다 훨씬 작다. `deferredReuses`에 잡힌다 | 정상 동작이다. **AI 호출량을 실측**하려면 `--Mapping:ReinferAfterHours=0`으로 백오프를 끄고 재기동 |
 | **T2** | 서버 저장소가 전부 **인메모리** | 재시작하면 지표·캐시·감사로그가 전멸 | **한 측정 세션 = 서버 1회 연속 실행.** 끝내기 전에 `/v1/metrics`를 파일로 저장 |
 | **T3** | `UiaObserver.TryGetUrl`이 "첫 번째 Edit 자손"을 주소창으로 가정 | 폼 입력칸 값이 URL로 잡혀 H2가 통째로 무의미해짐 | 캡처 직후 §2.2로 **URL부터 육안 확인** |
 | **T4** | `Observation:MaxNodes`(기본 4000) 절단 | 절단 지점이 방문마다 달라지면 같은 화면이 다른 서명을 가짐 | 캡처 직후 노드 수 확인(§2.2). 상한에 닿으면 `MaxNodes`를 올리고 재캡처 |
@@ -203,7 +204,7 @@ dotnet run --project src/ChoPilot.Client -- --delay 5 --bedrock  2> bedrock.log
 ```bash
 POST() { curl -s -X POST http://127.0.0.1:5080/v1/observations \
            -H 'Content-Type: application/json' --data-binary @- \
-         | jq -c '{observation_id, cache_hit, signature: .signature[7:19]}'; }
+         | jq -c '{observation_id, cache_hit, source, signature: .signature[7:19]}'; }
 
 REPLAY() { jq -c --arg id "$2" '.observation | .EventId = $id' "$1" | POST; }
 ```
@@ -216,8 +217,13 @@ REPLAY out/pr_create_PR456.snapshot.json  r2     # 같은 화면 → cache_hit t
 ```
 
 ```bash
-curl -s http://127.0.0.1:5080/v1/metrics | jq -c '{cacheHitRatio, distinctSignatures, aiCalls}'
+curl -s http://127.0.0.1:5080/v1/metrics | jq -c '{cacheHitRatio, distinctSignatures, aiCalls, deferredReuses}'
 ```
+
+> **`cache_hit=false`와 "AI를 호출했다"는 같은 말이 아니다.** 저신뢰 매핑은 자기 신뢰도로 적중 조건을
+> 만족시킬 수 없어(θ 절벽) 캐시에 있어도 적중으로 세지 않는데, 그렇다고 매 관측마다 다시 물어보지도
+> 않는다(재추론 백오프). 세 경우를 `source`로 구분하라 — `trusted_cache`(적중) / `deferred_cache`(재사용,
+> 호출 없음) / `ai`(실제 호출). `aiCalls`는 `ai`만, `deferredReuses`는 `deferred_cache`만 센다.
 
 > **`distinctSignatures`가 진짜 진단값이다.** 캡처한 화면이 3종인데 이 값이 3보다 크면, 같은 화면이 여러 서명으로 갈라졌다는 뜻이고 적중률은 절대 95%에 못 간다. 원인은 §1.3의 T4(절단)이거나 화면에 남아 있는 동적 구조다. 갈린 두 스냅샷의 구조를 직접 비교하려면 `SignatureService.Skeleton()`이 해시 이전 형태를 돌려준다.
 
@@ -231,9 +237,12 @@ REPLAY out/pr_create_v2.snapshot.json  h2        # 필드 추가/재배치 후
 **통과 조건: 서명이 달라지고 `cache_hit=false`.** (확인 예시)
 
 ```
-{"observation_id":"h1","cache_hit":false,"signature":"56917f85b35c"}
-{"observation_id":"h2","cache_hit":false,"signature":"b698b49ff5e7"}   ← 서명 변경 → 재추론
+{"observation_id":"h1","cache_hit":false,"source":"ai","signature":"56917f85b35c"}
+{"observation_id":"h2","cache_hit":false,"source":"ai","signature":"b698b49ff5e7"}   ← 서명 변경 → 재추론
 ```
+
+> `source`가 `deferred_cache`로 나오면 자가치유가 아니라 백오프에 걸린 것이다 — 서명이 같다는 뜻이니
+> 화면 변경이 구조에 반영되지 않았다는 신호다.
 
 **(3) 반증 테스트 — 바뀌면 안 되는 것도 확인하라.** 목록 화면을 행 수만 다르게 캡처해 재생한다. **서명이 같고 두 번째가 `cache_hit=true`여야 정상**이다. 여기서 서명이 갈리면 실제 운영에서 매 스크롤마다 AI를 호출하게 된다.
 

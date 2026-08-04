@@ -20,7 +20,8 @@ public sealed record AuditEntry(
     string Status,
     double DurationMs,
     int? InputTokens,
-    int? OutputTokens);
+    int? OutputTokens,
+    string Source = MappingResolver.Source.Ai);   // trusted_cache | deferred_cache | ai
 
 /// <summary>
 /// H3b(캐시 적중률)·H6(지연 p95, AI 토큰비용) 집계 (PHASE0-KIT §3.4·§3.5, PHASE1-DESIGN §7).
@@ -36,6 +37,7 @@ public sealed record MetricsSnapshot(
     double LatencyP95Ms,
     double LatencyMaxMs,
     int AiCalls,
+    int DeferredReuses,
     int InputTokens,
     int OutputTokens,
     int MaskedRefs,
@@ -70,7 +72,8 @@ public sealed class AuditService
             Status: entry.Status,
             DurationMs: durationMs,
             InputTokens: result.InputTokens,
-            OutputTokens: result.OutputTokens);
+            OutputTokens: result.OutputTokens,
+            Source: result.Source);
         _log.Enqueue(e);
         return e;
     }
@@ -90,7 +93,7 @@ public sealed class AuditService
     {
         var entries = _log.ToArray();
         if (entries.Length == 0)
-            return new MetricsSnapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, new(), new());
+            return new MetricsSnapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, new(), new());
 
         var hits = entries.Count(e => e.CacheHit);
         var durations = entries.Select(e => e.DurationMs).OrderBy(d => d).ToArray();
@@ -104,7 +107,10 @@ public sealed class AuditService
             LatencyP50Ms: Math.Round(Percentile(durations, 0.50), 2),
             LatencyP95Ms: Math.Round(Percentile(durations, 0.95), 2),
             LatencyMaxMs: Math.Round(durations[^1], 2),
-            AiCalls: entries.Length - hits,                 // 캐시 미스 1건 = AI 호출 1회
+            // 미스 = AI 호출이 아니다. 저신뢰 캐시를 재사용한 관측은 적중도 호출도 아니라,
+            // 미스에서 빼서 세지 않으면 AI 호출 수(=비용)가 부풀려진다.
+            AiCalls: entries.Count(e => e.Source == MappingResolver.Source.Ai),
+            DeferredReuses: entries.Count(e => e.Source == MappingResolver.Source.DeferredCache),
             InputTokens: entries.Sum(e => e.InputTokens ?? 0),
             OutputTokens: entries.Sum(e => e.OutputTokens ?? 0),
             MaskedRefs: entries.Sum(e => e.MaskedRefCount),

@@ -174,7 +174,8 @@ function renderMetrics() {
     metricCard('지연 p95 (H6)', `${m.latencyP95Ms} ms`,
       `p50 ${m.latencyP50Ms} · 최대 ${m.latencyMaxMs} · 서버 구간만 ≤ ${PASS.h6}ms`, m.latencyP95Ms <= PASS.h6),
     metricCard('관측 수', m.observations, `서명 ${m.distinctSignatures}종`, null),
-    metricCard('AI 호출 (H6)', m.aiCalls, `입력 ${m.inputTokens} / 출력 ${m.outputTokens} 토큰`, null),
+    metricCard('AI 호출 (H6)', m.aiCalls,
+      `입력 ${m.inputTokens} / 출력 ${m.outputTokens} 토큰 · 재추론 보류 ${m.deferredReuses || 0}회`, null),
     metricCard('마스킹 (H4)', m.maskedRefs, `잔존 PII ${residualTotal()}건`, residualTotal() === 0),
   ].join('');
 
@@ -186,7 +187,9 @@ function renderMetrics() {
     warn.hidden = false;
     warn.innerHTML = '<strong>측정 함정 T1.</strong> 매핑이 전부 <code>pending_review</code>이고 적중률이 0이다 — '
       + 'StubAiMapper의 신뢰도(0.6)가 <code>Mapping:ThetaHigh</code>(기본 0.8) 미만이라 캐시가 구조적으로 적중하지 못한다. '
-      + '<code>--Mapping:ThetaHigh=0.5</code> 로 재기동하거나 <code>UseBedrock=true</code>로 실제 AI를 써라.';
+      + '<code>--Mapping:ThetaHigh=0.5</code> 로 재기동하거나 <code>UseBedrock=true</code>로 실제 AI를 써라. '
+      + 'AI 호출은 재추론 백오프(<code>Mapping:ReinferAfterHours</code>, 기본 24h)가 막고 있지만, '
+      + '<b>적중률 0은 그대로다</b> — 검수·보정(<code>/v1/review</code>)으로 신뢰도를 올려야 해소된다.';
   } else {
     warn.hidden = true;
   }

@@ -37,7 +37,14 @@ public sealed record MappingEntry(
     RecordHint? RecordId,
     List<FieldMapping> Mapping,
     double Confidence,
-    string Status);        // "trusted" | "pending_review"
+    string Status,         // "trusted" | "pending_review"
+
+    /// <summary>
+    /// 이 서명에 대해 AI 추론을 마지막으로 시도한 시각. 사람이 만든 매핑(보정·승격)은 null.
+    /// 저신뢰 매핑의 <b>재추론 백오프</b> 기준이다 — <see cref="Status"/>가 pending_review인 채로
+    /// 남아 있어도 매 관측마다 다시 물어보지 않는다.
+    /// </summary>
+    DateTimeOffset? LastInferredAt = null);
 
 public sealed record FieldMapping(
     string ElementRef,

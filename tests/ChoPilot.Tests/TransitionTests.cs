@@ -204,8 +204,8 @@ public class TransitionEndpointTests
         }
 
         var profile = await client.GetFromJsonAsync<JsonElement>("/v1/uep");
-        var edge = Assert.Single(profile.GetProperty("transitions").EnumerateArray()
-            .Where(t => t.GetProperty("toTitle").GetString() == "발주 목록"));
+        var edge = Assert.Single(profile.GetProperty("transitions").EnumerateArray(),
+            t => t.GetProperty("toTitle").GetString() == "발주 목록");
         Assert.Equal(2, edge.GetProperty("count").GetInt32());
 
         // 구매요청 화면의 가이드가 다음 화면을 제안한다 (화면 하나만 봐서는 나올 수 없는 힌트)

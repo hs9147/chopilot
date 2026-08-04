@@ -198,9 +198,14 @@ public class AuditServiceTests
         new() { new FieldMapping("n2", "UnitPrice", 0.9, "ai", true) }, 0.9, "trusted");
 
     private static MappingResolver.ResolveResult Miss(int inTok = 900, int outTok = 120) =>
-        new(Entry(), CacheHit: false, inTok, outTok);
+        new(Entry(), MappingResolver.Source.Ai, inTok, outTok);
 
-    private static MappingResolver.ResolveResult Hit() => new(Entry(), CacheHit: true);
+    private static MappingResolver.ResolveResult Hit() =>
+        new(Entry(), MappingResolver.Source.TrustedCache);
+
+    /// <summary>저신뢰 캐시 재사용 — 적중도 아니고 AI 호출도 아니다.</summary>
+    private static MappingResolver.ResolveResult Deferred() =>
+        new(Entry(), MappingResolver.Source.DeferredCache);
 
     [Fact]
     public void Record_Appends_And_Snapshot_IsNewestFirst()
@@ -243,7 +248,7 @@ public class AuditServiceTests
         Assert.Equal(0.75, m.CacheHitRatio);            // H3b 통과선 ≥0.95와 직접 비교 가능
         Assert.Equal(2, m.DistinctSignatures);
 
-        Assert.Equal(1, m.AiCalls);                     // 캐시 미스 = Bedrock 호출
+        Assert.Equal(1, m.AiCalls);                     // 실제 Bedrock 호출만
         Assert.Equal(900, m.InputTokens);               // H6 비용 원자료
         Assert.Equal(120, m.OutputTokens);
 
@@ -253,6 +258,23 @@ public class AuditServiceTests
 
         Assert.Equal(4, m.MaskedRefs);                  // 이벤트당 마스킹 1건
         Assert.Equal(4, m.ByStatus["trusted"]);
+    }
+
+    [Fact]
+    public void Metrics_DoNotCount_DeferredReuse_AsAiCall()
+    {
+        var audit = new AuditService();
+        audit.Record(Evt(), "sig", Miss(900, 120), durationMs: 2500);
+        audit.Record(Evt() with { EventId = "e2" }, "sig", Deferred(), durationMs: 5);
+        audit.Record(Evt() with { EventId = "e3" }, "sig", Deferred(), durationMs: 5);
+
+        var m = audit.Metrics();
+
+        // 미스를 AI 호출로 세면 3건이 된다 — 실제로는 1번만 물어봤다
+        Assert.Equal(1, m.AiCalls);
+        Assert.Equal(2, m.DeferredReuses);
+        Assert.Equal(0, m.CacheHits);                   // 저신뢰 재사용은 적중이 아니다(H3b 부풀림 방지)
+        Assert.Equal(900, m.InputTokens);
     }
 }
 

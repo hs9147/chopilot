@@ -47,7 +47,11 @@ builder.Services.AddSingleton(sp => new MappingResolver(
     sp.GetRequiredService<IMappingCache>(),
     sp.GetRequiredService<IAiMapper>(),
     cfg["Mapping:OrgId"] ?? "default",
-    cfg.GetValue<double?>("Mapping:ThetaHigh") ?? 0.8));
+    cfg.GetValue<double?>("Mapping:ThetaHigh") ?? 0.8,
+    // 저신뢰 매핑 재추론 백오프. 0으로 두면 θ 절벽이 되살아난다(관측마다 Bedrock 재호출).
+    reinferAfter: cfg.GetValue<double?>("Mapping:ReinferAfterHours") is { } h
+        ? TimeSpan.FromHours(h)
+        : MappingResolver.DefaultReinferAfter));
 
 var app = builder.Build();
 
@@ -87,6 +91,7 @@ app.MapPost("/v1/observations",
         signature,
         status = "accepted",
         cache_hit = res.CacheHit,
+        source = res.Source,          // trusted_cache | deferred_cache | ai — 미스와 AI 호출은 다르다
         business_object = res.Entry.BusinessObject,
         confidence = res.Entry.Confidence
     });
