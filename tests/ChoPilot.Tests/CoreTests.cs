@@ -46,6 +46,66 @@ public class SignatureServiceTests
         // 구조 변경 → 서명 변경 → 자가치유(재추론) 트리거
         Assert.NotEqual(s1, s2);
     }
+
+    /// <summary>행 n개짜리 발주 목록 테이블. 행별 AutomationId에 인덱스가 들어간다.</summary>
+    private static UiNode Grid(int rows) => new(
+        "n1", "Window", "발주 조회", null, null, new()
+        {
+            new("g", "Table", "발주목록", null, "grdOrders", Enumerable.Range(1, rows).Select(i =>
+                new UiNode($"r{i}", "DataItem", $"행 {i}", null, $"grdOrders_row_{i}", new()
+                {
+                    new($"r{i}c1", "Text", "발주번호", $"PO-{i:D4}", $"cell_{i}_no", new()),
+                    new($"r{i}c2", "Text", "거래처", "A사", $"cell_{i}_vendor", new()),
+                })).ToList()),
+        });
+
+    [Fact]
+    public void Signature_IsStable_AcrossRowCounts()
+    {
+        var screen = new ScreenInfo("https://proc/po/list", "발주 조회", null);
+
+        // 가상화 테이블은 스크롤 위치에 따라 트리에 노출되는 행 수가 달라진다.
+        // 정규화가 없으면 방문마다 서명이 바뀌어 캐시가 전혀 듣지 않는다(H3b).
+        Assert.Equal(
+            SignatureService.Compute(screen, Grid(3)),
+            SignatureService.Compute(screen, Grid(10)));
+    }
+
+    [Fact]
+    public void Signature_IsStable_WhenOnlyDigitsInAutomationIdDiffer()
+    {
+        var screen = new ScreenInfo("https://proc/pr/create", "구매요청", null);
+        UiNode WithId(string id) => new("n1", "Window", "구매요청 등록", null, null, new()
+        {
+            new("n2", "Edit", "품목코드", "M-001", id, new()),
+        });
+
+        Assert.Equal(
+            SignatureService.Compute(screen, WithId("txtMat_7")),
+            SignatureService.Compute(screen, WithId("txtMat_812")));
+    }
+
+    [Fact]
+    public void Signature_StillChanges_WhenColumnIsAdded()
+    {
+        var screen = new ScreenInfo("https://proc/po/list", "발주 조회", null);
+        var withExtraColumn = Grid(3);
+        foreach (var row in withExtraColumn.Children[0].Children)
+            row.Children.Add(new UiNode($"{row.Ref}c3", "Text", "금액", "1000", "cell_amt", new()));
+
+        // 행 수는 흡수하되 열 구성 변경(실제 구조 변경)은 여전히 감지해야 자가치유가 성립한다.
+        Assert.NotEqual(
+            SignatureService.Compute(screen, Grid(3)),
+            SignatureService.Compute(screen, withExtraColumn));
+    }
+
+    [Fact]
+    public void NormalizeAutomationId_ReplacesDigitRuns()
+    {
+        Assert.Equal("grid_row_#", SignatureService.NormalizeAutomationId("grid_row_12"));
+        Assert.Equal("txtMat", SignatureService.NormalizeAutomationId("txtMat"));
+        Assert.Equal("c#_#", SignatureService.NormalizeAutomationId("c10_3"));
+    }
 }
 
 public class PrivacyGateTests
