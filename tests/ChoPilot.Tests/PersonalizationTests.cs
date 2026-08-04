@@ -315,6 +315,22 @@ public class PersonalizationApiTests
     }
 
     [Fact]
+    public async Task Ontology_Serves_Names_AndAliases_ForTheCorrectionForm()
+    {
+        using var factory = NewServer();
+        using var doc = JsonDocument.Parse(await factory.CreateClient().GetStringAsync("/v1/ontology"));
+
+        var concepts = doc.RootElement.GetProperty("concepts").EnumerateArray().ToList();
+        Assert.Equal(ProcurementOntology.Concepts.Length, concepts.Count);
+
+        // 사용자는 "UnitPrice"가 아니라 "단가"로 정정한다 — 별칭이 없으면 보정 폼이 쓸모없다
+        var unitPrice = Assert.Single(concepts, c => c.GetProperty("name").GetString() == "UnitPrice");
+        Assert.Contains(unitPrice.GetProperty("aliases").EnumerateArray(),
+            a => a.GetString() == "단가");
+        Assert.True(unitPrice.GetProperty("sensitive").GetBoolean());
+    }
+
+    [Fact]
     public async Task Uep_Requires_UserHeader()
     {
         using var factory = NewServer();

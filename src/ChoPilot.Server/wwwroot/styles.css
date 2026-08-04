@@ -123,6 +123,13 @@ code { font-family: var(--mono); font-size: .9em; }
 .drop p { margin: 3px 0; }
 .drop.over { border-color: var(--accent); background: var(--pass-bg); }
 .check { display: block; margin-top: 12px; font-size: 13px; }
+
+/* 검수·보정 입력 (측정자 ID, 개념 정정) */
+input.text {
+  font: inherit; font-size: 13px; padding: 4px 8px; min-width: 150px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text);
+}
 .log {
   margin-top: 12px; max-height: 190px; overflow: auto;
   border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;

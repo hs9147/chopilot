@@ -13,6 +13,7 @@ const PASS = {
 
 const SCORING_KEY = 'chopilot.measure.scoring';
 const SOURCES_KEY = 'chopilot.measure.sources';   // 재생 ID → 원본 파일명. 새로고침해도 유지된다.
+const ACTOR_KEY = 'chopilot.measure.actor';       // 보정·승격을 기록할 사람
 
 const state = {
   metrics: null,
@@ -23,6 +24,12 @@ const state = {
   selected: null,
   detail: null,
   scoring: loadScoring(),
+  review: [],
+  decisions: [],
+  suggestions: null,
+  concepts: [],
+  editing: null,          // 보정 중인 검수 큐 항목
+  actor: localStorage.getItem(ACTOR_KEY) || '',
 };
 
 /* ── 유틸 ─────────────────────────────────────────────── */
@@ -130,13 +137,18 @@ async function uploadFiles(fileList) {
 
 async function refreshAll() {
   try {
-    const [metrics, observations, signatures] = await Promise.all([
+    const [metrics, observations, signatures, review, decisions, suggestions, ontology] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
+      api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
     state.routes = signatures.routes;
     state.splitRoutes = signatures.splitRoutes;
+    state.review = review.entries;
+    state.decisions = decisions.entries;
+    state.suggestions = suggestions.stats;
+    state.concepts = ontology.concepts;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
   } catch (err) {
@@ -146,6 +158,8 @@ async function refreshAll() {
 
   renderMetrics();
   renderSignatures();
+  renderReview();
+  renderDecisions();
   renderObservations();
   renderVerdict();
   if (state.selected) await selectObservation(state.selected);
@@ -177,6 +191,7 @@ function renderMetrics() {
     metricCard('AI 호출 (H6)', m.aiCalls,
       `입력 ${m.inputTokens} / 출력 ${m.outputTokens} 토큰 · 재추론 보류 ${m.deferredReuses || 0}회`, null),
     metricCard('마스킹 (H4)', m.maskedRefs, `잔존 PII ${residualTotal()}건`, residualTotal() === 0),
+    suggestionCard(),
   ].join('');
 
   // T1 — 스텁 신뢰도 0.6 < 기본 θ 0.8 이면 적중률이 구조적으로 0이 된다.
@@ -196,6 +211,169 @@ function renderMetrics() {
 }
 
 const residualTotal = () => state.observations.reduce((sum, o) => sum + o.residualPiiCount, 0);
+
+// 제안 수락률 (ARCHITECTURE §9 KPI). Phase 0 가설이 아니라 통과선이 없어 판정하지 않는다.
+function suggestionCard() {
+  const s = state.suggestions;
+  if (!s || s.impressions === 0)
+    return metricCard('제안 수락률 (§9)', '—', '아직 노출된 제안 없음', null);
+
+  const decided = s.accepted + s.rejected;
+  return metricCard('제안 수락률 (§9)',
+    decided === 0 ? '판단 없음' : pct(s.acceptanceRate),
+    `노출 ${s.impressions} · 수락 ${s.accepted} / 거부 ${s.rejected} · 응답률 ${pct(s.responseRate)}`, null);
+}
+
+/* ── 검수 큐 & 보정 (HITL) ────────────────────────────── */
+
+function renderReview() {
+  const box = $('review');
+  if (state.review.length === 0) {
+    box.innerHTML = '<p class="empty">검수 대기 매핑 없음 — 저신뢰로 남은 화면이 없다</p>';
+    renderCorrection();
+    return;
+  }
+
+  const rows = state.review.map((e) => `<tr class="clickable ${state.editing && state.editing.signature === e.signature && state.editing.scope === e.scope ? 'selected' : ''}"
+      data-sig="${esc(e.signature)}" data-scope="${esc(e.scope)}">
+    <td class="mono">${shortSig(e.signature)}</td>
+    <td>${esc(e.businessObject)}</td>
+    <td class="mono">${esc(e.scope)}</td>
+    <td class="num">${e.confidence.toFixed(2)}</td>
+    <td class="num">${e.mapping.length}</td>
+    <td class="hint">${e.lastInferredAt ? esc(e.lastInferredAt.slice(0, 19).replace('T', ' ')) : '사람이 만든 매핑'}</td>
+  </tr>`).join('');
+
+  box.innerHTML = `<table>
+    <thead><tr>
+      <th>서명</th><th>업무객체</th><th>스코프</th>
+      <th class="num">신뢰도</th><th class="num">필드</th><th>마지막 추론</th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+
+  box.querySelectorAll('tr.clickable').forEach((tr) => {
+    tr.addEventListener('click', () => {
+      const entry = state.review.find((e) => e.signature === tr.dataset.sig && e.scope === tr.dataset.scope);
+      state.editing = state.editing === entry ? null : entry;
+      renderReview();
+    });
+  });
+
+  renderCorrection();
+}
+
+function conceptOptions() {
+  // 사용자는 화면에 보이는 말("단가")로 정정한다. 정규 이름과 별칭을 모두 후보로 준다.
+  const names = state.concepts.flatMap((c) => [c.name, ...(c.aliases || [])]);
+  return names.map((n) => `<option value="${esc(n)}"></option>`).join('');
+}
+
+function renderCorrection() {
+  const box = $('correction');
+  const entry = state.editing;
+  if (!entry) { box.innerHTML = ''; return; }
+
+  const rows = entry.mapping.map((m, i) => `<tr>
+    <td class="mono">${esc(m.elementRef)}</td>
+    <td><input type="text" class="text" data-field="${i}" value="${esc(m.concept)}" list="conceptList"></td>
+    <td class="num">${m.confidence.toFixed(2)}</td>
+    <td>${esc(m.provenance)}</td>
+  </tr>`).join('');
+
+  box.innerHTML = `<div class="detail">
+    <div class="detail-head">
+      <h3 style="margin:0">보정 — <code>${shortSig(entry.signature)}</code> ${esc(entry.businessObject)}</h3>
+      <div>
+        <button id="applyCorrection" class="btn btn-primary btn-sm">보정 저장 (개인)</button>
+        <button id="promoteEntry" class="btn btn-sm">그대로 승격 (공용)</button>
+      </div>
+    </div>
+    <p class="hint">
+      <strong>보정</strong>은 이 매핑을 <code>personal:{측정자}</code>에 신뢰도 1.0으로 심는다 — 본인에게만 적용된다.
+      <strong>승격</strong>은 지금 매핑을 그대로 공용 평면에서 trusted로 올린다 — 모두에게 적용된다.
+      개념은 별칭으로도 받는다(예: <code>단가</code>). 온톨로지에 없는 개념이 하나라도 있으면 전체가 거부된다.
+    </p>
+    <datalist id="conceptList">${conceptOptions()}</datalist>
+    <div class="table-scroll"><table>
+      <thead><tr><th>ref</th><th>개념</th><th class="num">신뢰도</th><th>출처</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <p id="correctionMsg" class="hint"></p>
+  </div>`;
+
+  $('applyCorrection').addEventListener('click', () => applyCorrection(entry));
+  $('promoteEntry').addEventListener('click', () => promoteEntry(entry));
+}
+
+function requireActor(msgBox) {
+  if (state.actor) return state.actor;
+  msgBox.className = 'warn';
+  msgBox.textContent = '측정자 ID를 먼저 입력하라 — 누가 승인했는지 남지 않는 보정은 되돌릴 수 없다.';
+  $('actor').focus();
+  return null;
+}
+
+async function applyCorrection(entry) {
+  const msg = $('correctionMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  const mapping = entry.mapping.map((m, i) => ({
+    elementRef: m.elementRef,
+    concept: $('correction').querySelector(`[data-field="${i}"]`).value.trim(),
+  }));
+
+  try {
+    const saved = await api('/v1/correction', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-ChoPilot-User': actor },
+      body: JSON.stringify({ signature: entry.signature, businessObject: entry.businessObject, mapping }),
+    });
+    msg.className = 'hint';
+    msg.textContent = `저장됨 — ${saved.scope} · 신뢰도 ${saved.confidence}. 같은 화면은 이제 AI 호출 없이 적중한다.`;
+    state.editing = null;
+    await refreshAll();
+  } catch (err) {
+    msg.className = 'warn';
+    msg.textContent = `거부됨: ${err.message}`;
+  }
+}
+
+async function promoteEntry(entry) {
+  const msg = $('correctionMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  try {
+    await api('/v1/review/promote', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-ChoPilot-User': actor },
+      body: JSON.stringify({ signature: entry.signature, scope: entry.scope }),
+    });
+    state.editing = null;
+    await refreshAll();
+  } catch (err) {
+    msg.className = 'warn';
+    msg.textContent = `승격 실패: ${err.message}`;
+  }
+}
+
+function renderDecisions() {
+  const box = $('decisions');
+  if (state.decisions.length === 0) {
+    box.innerHTML = '<p class="empty">아직 검수·보정 이력 없음</p>';
+    return;
+  }
+  box.innerHTML = `<table>
+    <thead><tr><th>시각</th><th>행위</th><th>사람</th><th>서명</th><th>스코프</th><th>내용</th></tr></thead>
+    <tbody>${state.decisions.map((d) => `<tr>
+      <td class="hint">${esc(d.at.slice(0, 19).replace('T', ' '))}</td>
+      <td><span class="badge">${esc(d.action)}</span></td>
+      <td>${esc(d.actor)}</td>
+      <td class="mono">${shortSig(d.signature)}</td>
+      <td class="mono">${esc(d.scope)}</td>
+      <td class="hint">${esc(d.detail)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
 
 function renderSignatures() {
   const box = $('signatures');
@@ -475,9 +653,26 @@ function buildMarkdown() {
     `- 지연 p50 / p95 / 최대: ${m.latencyP50Ms} / ${m.latencyP95Ms} / ${m.latencyMaxMs} ms`,
     '- **이 값은 서버 내부 구간(서명→매핑→BO)만 잰 하한이다.** UIA 캡처·네트워크 왕복·Guide 조회는 별도로 측정해 더해야 NFR(≤3s)과 비교할 수 있다.',
     `- AI 호출 ${m.aiCalls || 0}회 · 입력 ${m.inputTokens || 0} / 출력 ${m.outputTokens || 0} 토큰`,
+    `- 재추론 보류 ${m.deferredReuses || 0}회 — 저신뢰 캐시를 재사용해 아끼지 않았다면 AI 호출은 ${(m.aiCalls || 0) + (m.deferredReuses || 0)}회였다`,
     (m.inputTokens || m.outputTokens)
       ? ''
       : '- 토큰이 0인 것은 비용이 없다는 뜻이 아니라 **미측정**이다 (`UseBedrock=true`일 때만 채워진다).',
+    '',
+    '## 검수·보정 (HITL)',
+    '',
+    `- 검수 대기 ${state.review.length}건 · 결정 이력 ${state.decisions.length}건`,
+    ...(state.decisions.length
+      ? ['', '| 시각 | 행위 | 사람 | 서명 | 내용 |', '|------|------|------|------|------|',
+         ...state.decisions.map((d) => `| ${d.at.slice(0, 19).replace('T', ' ')} | ${d.action} | ${d.actor} | \`${shortSig(d.signature)}\` | ${d.detail} |`)]
+      : ['- 아직 사람이 개입한 이력이 없다. 저신뢰 매핑이 남아 있다면 적중률은 올라가지 않는다.']),
+    '',
+    '## 제안 수락률 (ARCHITECTURE §9)',
+    '',
+    state.suggestions && state.suggestions.impressions
+      ? `- 노출 ${state.suggestions.impressions} · 수락 ${state.suggestions.accepted} / 거부 ${state.suggestions.rejected} / 무응답 ${state.suggestions.pending}`
+        + ` · 수락률 ${pct(state.suggestions.acceptanceRate)} · 응답률 ${pct(state.suggestions.responseRate)}`
+      : '- 노출된 제안이 없다 (`/v1/guide`를 호출해야 집계된다).',
+    '- 수락률은 **명시적 판단 중** 수락 비율이다. 무응답은 거부가 아니라 응답률에만 반영된다.',
     '',
     '## 미측정 항목',
     '',
@@ -503,6 +698,13 @@ function bind() {
 
   $('refresh').addEventListener('click', refreshAll);
 
+  const actor = $('actor');
+  actor.value = state.actor;
+  actor.addEventListener('input', () => {
+    state.actor = actor.value.trim();
+    localStorage.setItem(ACTOR_KEY, state.actor);
+  });
+
   for (const key of ['h1Total', 'h1Ok', 'h3Total', 'h3Ai', 'h3Base']) {
     const input = $(key);
     input.value = state.scoring[key] ?? '';
@@ -524,6 +726,9 @@ function bind() {
       observations: state.observations,
       sources: state.sources,
       scoring: state.scoring,
+      review: state.review,
+      decisions: state.decisions,
+      suggestions: state.suggestions,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

@@ -169,6 +169,9 @@ app.MapGet("/v1/uep", (HttpRequest request, UepStore uep) =>
         : Results.Ok(profile);
 });
 
+// 보정 폼이 쓸 개념 목록. 사용자는 "UnitPrice"가 아니라 "단가"로 정정하므로 별칭까지 내려준다.
+app.MapGet("/v1/ontology", () => Results.Ok(new { concepts = ProcurementOntology.Concepts }));
+
 // 검수 큐(HITL) — 저신뢰 매핑 열람. 개인 스코프는 제외된다.
 app.MapGet("/v1/review", (PersonalizationService svc, int? limit) =>
     Results.Ok(new { entries = svc.ReviewQueue(limit ?? 100) }));
