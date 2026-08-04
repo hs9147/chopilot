@@ -81,6 +81,10 @@ public sealed class AuditService
 
     public int Count => _log.Count;
 
+    /// <summary>이벤트별 최종 캐시 적중 여부 (측정 UI 요약용). 같은 ID가 재전송되면 마지막 판정을 쓴다.</summary>
+    public IReadOnlyDictionary<string, bool> CacheHitByEventId() =>
+        _log.GroupBy(e => e.EventId).ToDictionary(g => g.Key, g => g.Last().CacheHit);
+
     /// <summary>전체 감사 로그에서 H3b·H6 지표를 산출.</summary>
     public MetricsSnapshot Metrics()
     {

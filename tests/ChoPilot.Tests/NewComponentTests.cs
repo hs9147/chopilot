@@ -364,3 +364,97 @@ public class ServerMetricsTests
         Assert.Equal(0, doc.RootElement.GetProperty("observations").GetInt32());
     }
 }
+
+/// <summary>측정 UI가 의존하는 조회 API (PHASE0-MEASUREMENT).</summary>
+public class ServerMeasurementApiTests
+{
+    private static WebApplicationFactory<Program> NewServer() =>
+        new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.UseSetting("Mapping:ThetaHigh", "0.5"));
+
+    private static ObservationEvent Observation(string id, string url, List<UiNode> fields, List<string> maskedRefs) => new(
+        EventId: id, SessionId: "sess", UserId: "user",
+        CapturedAt: DateTimeOffset.UtcNow,
+        Screen: new ScreenInfo(url, "구매요청 등록", ScreenIdentifier.Identify(url)),
+        Tree: new UiNode("n1", "Window", "구매요청 등록", null, null, fields),
+        Privacy: new PrivacyInfo("1.0", maskedRefs));
+
+    [Fact]
+    public async Task Observations_Expose_Inventory_Masking_AndResidualPii()
+    {
+        using var factory = NewServer();
+        var client = factory.CreateClient();
+
+        var evt = Observation("obs-1", "https://proc/pr/create?id=PR1", new()
+        {
+            new("n2", "Edit", "품목코드", "M-001", "txtMat", new()),
+            new("n3", "Edit", null, PrivacyGate.MaskToken, "txtPrice", new()),
+            new("n4", "Text", "메모", "hong@corp.com", null, new()),   // 마스킹을 놓친 값
+        }, maskedRefs: new() { "n3" });
+
+        await client.PostAsJsonAsync("/v1/observations", evt);
+
+        using var listDoc = JsonDocument.Parse(await client.GetStringAsync("/v1/observations"));
+        var item = listDoc.RootElement.GetProperty("items")[0];
+
+        Assert.Equal(1, listDoc.RootElement.GetProperty("count").GetInt32());
+        Assert.Equal("/pr/create", item.GetProperty("route").GetString());
+        Assert.Equal(4, item.GetProperty("nodeCount").GetInt32());        // 루트 포함
+        Assert.Equal(3, item.GetProperty("namedCount").GetInt32());
+        Assert.Equal(1, item.GetProperty("maskedCount").GetInt32());
+        Assert.Equal(1, item.GetProperty("residualPiiCount").GetInt32()); // H4 반증이 잡아낸다
+        Assert.Equal("PR1", item.GetProperty("recordHint").GetProperty("value").GetString());
+
+        using var detailDoc = JsonDocument.Parse(await client.GetStringAsync("/v1/observations/obs-1"));
+        var nodes = detailDoc.RootElement.GetProperty("nodes").EnumerateArray().ToList();
+
+        Assert.Equal(4, nodes.Count);
+        Assert.True(nodes.Single(n => n.GetProperty("ref").GetString() == "n3").GetProperty("masked").GetBoolean());
+        Assert.True(nodes.Single(n => n.GetProperty("ref").GetString() == "n4").GetProperty("residualPii").GetBoolean());
+        Assert.Equal(1, nodes.Single(n => n.GetProperty("ref").GetString() == "n2").GetProperty("depth").GetInt32());
+    }
+
+    [Fact]
+    public async Task Detail_ReturnsNotFound_ForUnknownObservation()
+    {
+        using var factory = NewServer();
+        var resp = await factory.CreateClient().GetAsync("/v1/observations/nope");
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
+    [Fact]
+    public async Task Signatures_Flag_AScreenThatSplitIntoSeveralSignatures()
+    {
+        using var factory = NewServer();
+        var client = factory.CreateClient();
+
+        var baseFields = new List<UiNode> { new("n2", "Edit", "품목코드", "M-001", "txtMat", new()) };
+        var extraFields = new List<UiNode>
+        {
+            new("n2", "Edit", "품목코드", "M-001", "txtMat", new()),
+            new("n3", "Edit", "수량", "10", "txtQty", new()),      // 구조가 다르다 → 서명이 갈린다
+        };
+
+        await client.PostAsJsonAsync("/v1/observations", Observation("a", "https://proc/pr/create?id=1", baseFields, new()));
+        await client.PostAsJsonAsync("/v1/observations", Observation("b", "https://proc/pr/create?id=2", extraFields, new()));
+
+        using var doc = JsonDocument.Parse(await client.GetStringAsync("/v1/signatures"));
+        var route = doc.RootElement.GetProperty("routes")[0];
+
+        Assert.Equal(1, doc.RootElement.GetProperty("splitRoutes").GetInt32());
+        Assert.Equal("/pr/create", route.GetProperty("route").GetString());
+        Assert.Equal(2, route.GetProperty("observationCount").GetInt32());
+        Assert.Equal(2, route.GetProperty("signatureCount").GetInt32());
+        Assert.True(route.GetProperty("split").GetBoolean());
+    }
+
+    [Fact]
+    public async Task MeasurementConsole_IsServed_AtRoot()
+    {
+        using var factory = NewServer();
+        var resp = await factory.CreateClient().GetAsync("/");
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Contains("측정 콘솔", await resp.Content.ReadAsStringAsync());
+    }
+}

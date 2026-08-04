@@ -22,6 +22,9 @@ builder.Services.AddSingleton<IMappingCache, InMemoryMappingCache>();
 builder.Services.AddSingleton<ObservationStore>();
 builder.Services.AddSingleton<AuditService>();
 
+// 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
+builder.Services.AddSingleton(_ => new PrivacyGate(policyVersion: cfg["Privacy:PolicyVersion"] ?? "1.0"));
+
 if (cfg.GetValue<bool>("UseBedrock"))
 {
     var region = RegionEndpoint.GetBySystemName(cfg["Aws:Region"] ?? "ap-northeast-2");
@@ -43,6 +46,10 @@ builder.Services.AddSingleton(sp => new MappingResolver(
     cfg.GetValue<double?>("Mapping:ThetaHigh") ?? 0.8));
 
 var app = builder.Build();
+
+// 측정 대시보드(wwwroot/index.html). PHASE0-MEASUREMENT의 jq/curl 절차를 화면으로 대체한다.
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
@@ -89,6 +96,33 @@ app.MapGet("/v1/audit", (AuditService audit, int? limit) =>
 
 // H3b(캐시 적중률)·H6(지연 p95·AI 토큰) 자동 산출 — PHASE0-KIT 측정표의 원자료.
 app.MapGet("/v1/metrics", (AuditService audit) => Results.Ok(audit.Metrics()));
+
+// ── 측정 UI 조회 API (PHASE0-MEASUREMENT) ───────────────────────────────────
+// 적재된 스냅샷 목록. H1 획득 집계·H2 식별·H4 마스킹을 한 줄로 요약한다.
+app.MapGet("/v1/observations", (ObservationStore store, AuditService audit, PrivacyGate gate) =>
+{
+    var hits = audit.CacheHitByEventId();
+    var items = store.List()
+        .Select(s => MeasurementViews.Summarize(s, gate, hits.GetValueOrDefault(s.ObservationId)))
+        .ToList();
+    return Results.Ok(new { count = items.Count, items });
+});
+
+// 스냅샷 1건의 요소 인벤토리(PHASE0-KIT §2.1) + 적용된 매핑.
+app.MapGet("/v1/observations/{id}", (string id, ObservationStore store, AuditService audit, PrivacyGate gate) =>
+{
+    var stored = store.Get(id);
+    return stored is null
+        ? Results.NotFound(new { error = "unknown observation_id" })
+        : Results.Ok(MeasurementViews.Detail(stored, gate, audit.CacheHitByEventId().GetValueOrDefault(id)));
+});
+
+// route별 서명 그룹핑 — 같은 화면이 여러 서명으로 갈렸는지가 캐시 적중률 미달의 1차 원인.
+app.MapGet("/v1/signatures", (ObservationStore store) =>
+{
+    var routes = MeasurementViews.DiagnoseRoutes(store.List());
+    return Results.Ok(new { splitRoutes = routes.Count(r => r.Split), routes });
+});
 
 app.Run();
 

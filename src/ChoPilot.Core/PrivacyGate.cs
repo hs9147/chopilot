@@ -100,6 +100,26 @@ public sealed class PrivacyGate
         return (node.Value, null);
     }
 
+    /// <summary>
+    /// 게이트를 통과한 트리에 PII 원문이 남아 있는지 되짚는다 (H4 반증 테스트).
+    /// 기대 민감필드 목록이 틀렸을 수 있으므로, 재현율과 별개로 페이로드 자체를 훑어야 한다.
+    /// </summary>
+    public IReadOnlyList<string> ScanResidual(UiNode tree)
+    {
+        var hits = new List<string>();
+        Scan(tree);
+        return hits;
+
+        void Scan(UiNode node)
+        {
+            if (node.Value is { Length: > 0 } value && value != MaskToken &&
+                _patterns.Any(rule => rule.Regex.IsMatch(value)))
+                hits.Add(node.Ref);
+
+            foreach (var child in node.Children) Scan(child);
+        }
+    }
+
     private bool IsSensitiveName(string? name) =>
         name is { Length: > 0 } && _sensitiveConcepts.Contains(name.Trim().ToLowerInvariant());
 

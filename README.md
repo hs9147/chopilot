@@ -41,7 +41,8 @@ src/
                        BedrockAiMapper, PromptBuilder,
                        BusinessObjectBuilder, GuideService             (net8.0)
   ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
-  ChoPilot.Server/     Ingestion + Guide + Audit + Metrics (읽기전용 API) (net8.0, ASP.NET)
+  ChoPilot.Server/     Ingestion + Guide + Audit + Metrics (읽기전용 API)
+                       + wwwroot/ 측정 콘솔 (Phase 0 실측 UI)          (net8.0, ASP.NET)
 tests/
   ChoPilot.Tests/      Signature/Privacy/Stub/Bedrock/Guide +
                        ScreenIdentifier/Consent/EventSpool/Resolver +
@@ -71,12 +72,32 @@ dotnet run --project src/ChoPilot.Client -- --delay 3 --out out/pr_create.snapsh
 - `--baseline` : StubAiMapper(alias 매칭)로 매핑 시도 → AI 매핑 대비 성능 대조군 (PHASE0-KIT §3.3)
 - 산출 JSON은 [PHASE0-KIT.md](PHASE0-KIT.md) §2(관측 인벤토리)·§3(매핑) 측정의 원자료
 
-### 측정 (H3b · H6)
+### 측정 콘솔
+
+서버를 띄우고 **<http://localhost:5080/>** 를 열면 Phase 0 측정을 화면에서 진행할 수 있다.
+스냅샷을 끌어다 놓으면 재생되고, 지표·서명 진단·요소 인벤토리·채점·리포트 내려받기까지 한 화면에서 끝난다.
+
+```bash
+ASPNETCORE_URLS=http://127.0.0.1:5080 \
+dotnet run --project src/ChoPilot.Server -c Release -- --Mapping:ThetaHigh=0.5
+```
+
+| 콘솔 단계 | 다루는 가설 |
+|-----------|------------|
+| ① 스냅샷 적재 (드래그&드롭 재생) | — |
+| ② 지표 (통과선 대비 PASS/FAIL) | H3b 적중률 · H6 지연·토큰 |
+| ③ 서명 진단 (갈린 route 경고) | H3b 원인 |
+| ④ 스냅샷별 상세 (인벤토리·식별·마스킹) | H1 · H2 · H4 |
+| ⑤ 채점 &amp; 리포트 (Markdown/JSON) | 종합 Go/No-Go |
+
+### 측정 API (자동화용)
 
 서버는 감사 로그에서 지표를 직접 산출한다. PHASE0-KIT의 측정표를 손으로 채우는 대신 이 값을 쓴다.
 
 ```bash
-curl localhost:5080/v1/metrics
+curl localhost:5080/v1/metrics       # 적중률·지연·토큰 집계
+curl localhost:5080/v1/signatures    # route별 서명 그룹핑 (갈림 진단)
+curl localhost:5080/v1/observations  # 스냅샷 목록 + 인벤토리 집계
 ```
 
 | 필드 | 대응 가설 | 통과선 |

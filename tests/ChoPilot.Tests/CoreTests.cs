@@ -189,6 +189,23 @@ public class PrivacyGateTests
     }
 
     [Fact]
+    public void ScanResidual_FindsPii_ThatSurvivedTheGate()
+    {
+        // 클라이언트가 놓친 상태를 흉내낸다 — 서버가 받은 페이로드를 되짚는 반증 검사.
+        var arrived = new UiNode("n1", "Form", null, null, null, new()
+        {
+            new("n2", "Edit", "단가", PrivacyGate.MaskToken, null, new()),   // 정상 마스킹
+            new("n3", "Text", "메모", "연락 hong@corp.com", null, new()),    // 누출
+            new("n4", "Text", "비고", "900101-1234567", null, new()),        // 누출
+            new("n5", "Edit", "수량", "10", null, new()),
+        });
+
+        var residual = new PrivacyGate().ScanResidual(arrived);
+
+        Assert.Equal(new[] { "n3", "n4" }, residual);   // 마스킹 토큰·평범한 값은 잡지 않는다
+    }
+
+    [Fact]
     public void SensitiveLabel_DoesNotLeak_PastTheValueItLabels()
     {
         var tree = new UiNode("n1", "Form", null, null, null, new()
