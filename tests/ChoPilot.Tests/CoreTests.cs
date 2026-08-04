@@ -135,6 +135,74 @@ public class PrivacyGateTests
         Assert.Contains("n1", masked);
         Assert.Null(result.Value); // block → 값 제거
     }
+
+    [Fact]
+    public void Masks_Value_WhenLabelIsASeparateSiblingNode()
+    {
+        // 실제 웹 접근성 트리에서 흔한 형태: 라벨(Text)과 값(Edit)이 형제로 분리된다.
+        var tree = new UiNode("n1", "Form", null, null, null, new()
+        {
+            new("n2", "Text", "단가", null, null, new()),        // 라벨만
+            new("n3", "Edit", null, "12000", null, new()),       // 값만 — 자기 Name이 없다
+            new("n4", "Text", "수량", null, null, new()),
+            new("n5", "Edit", null, "10", null, new()),
+        });
+
+        var (result, masked) = new PrivacyGate().Apply(tree);
+
+        Assert.Contains("n3", masked);
+        Assert.Equal(PrivacyGate.MaskToken, result.Children[1].Value);
+        Assert.Equal("10", result.Children[3].Value);   // 비민감 라벨 뒤 값은 유지(과마스킹 방지)
+    }
+
+    [Fact]
+    public void Masks_Value_InsideWrapper_AfterSensitiveLabel()
+    {
+        var tree = new UiNode("n1", "Form", null, null, null, new()
+        {
+            new("n2", "Text", "공급단가", null, null, new()),
+            new("n3", "Group", null, null, null, new()
+            {
+                new("n4", "Edit", null, "9900", null, new()),
+            }),
+        });
+
+        var (_, masked) = new PrivacyGate().Apply(tree);
+
+        Assert.Contains("n4", masked);   // 값 없는 래퍼를 건너 상속된다
+    }
+
+    [Fact]
+    public void Masks_Value_ByAutomationId_WhenNoLabelExists()
+    {
+        var tree = new UiNode("n1", "Form", null, null, null, new()
+        {
+            new("n2", "Edit", null, "12000", "txtUnitPrice", new()),
+            new("n3", "Edit", null, "10", "txtQty", new()),
+        });
+
+        var (result, masked) = new PrivacyGate().Apply(tree);
+
+        Assert.Contains("n2", masked);
+        Assert.DoesNotContain("n3", masked);
+        Assert.Equal("10", result.Children[1].Value);
+    }
+
+    [Fact]
+    public void SensitiveLabel_DoesNotLeak_PastTheValueItLabels()
+    {
+        var tree = new UiNode("n1", "Form", null, null, null, new()
+        {
+            new("n2", "Text", "단가", null, null, new()),
+            new("n3", "Edit", null, "12000", null, new()),   // 라벨 소비
+            new("n4", "Edit", null, "M-001", null, new()),   // 무관한 후속 값
+        });
+
+        var (_, masked) = new PrivacyGate().Apply(tree);
+
+        Assert.Contains("n3", masked);
+        Assert.DoesNotContain("n4", masked);
+    }
 }
 
 public class StubAiMapperTests
