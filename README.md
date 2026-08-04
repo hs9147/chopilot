@@ -1,5 +1,7 @@
 # Cho-Pilot
 
+[![CI](https://github.com/hs9147/chopilot/actions/workflows/ci.yml/badge.svg)](https://github.com/hs9147/chopilot/actions/workflows/ci.yml)
+
 **Enterprise Work Intelligence Platform** — Screen을 이해하는 AI를 넘어 Business를 이해하는 AI.
 
 세 축(Web · Mail · Document)의 업무 신호를 통합해 현재 업무·목적·진행률·다음 작업을 실시간으로 이해한다.
@@ -38,11 +40,12 @@ src/
                        BedrockAiMapper, PromptBuilder,
                        BusinessObjectBuilder, GuideService             (net8.0)
   ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
-  ChoPilot.Server/     Ingestion + Guide + Audit (읽기전용 API)        (net8.0, ASP.NET)
+  ChoPilot.Server/     Ingestion + Guide + Audit + Metrics (읽기전용 API) (net8.0, ASP.NET)
 tests/
   ChoPilot.Tests/      Signature/Privacy/Stub/Bedrock/Guide +
                        ScreenIdentifier/Consent/EventSpool/Resolver +
-                       Server end-to-end (WebApplicationFactory)       (net8.0, 크로스플랫폼)
+                       Uploader/Dispatcher(전송 유실 방지) +
+                       Server end-to-end + Metrics                     (net8.0, 크로스플랫폼)
 ```
 
 ### 빌드
@@ -51,9 +54,10 @@ tests/
 
 ```bash
 dotnet build         # net8.0 4개(Core/Mapping/Server/Tests) + net8.0-windows 클라이언트
-dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 21개 검증
+dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 44개 검증
 ```
-> .NET 8 SDK 8.0.423 + Windows에서 빌드 0 경고 / 0 오류, 테스트 21/21 통과 검증 완료.
+> 빌드 0 경고 / 0 오류, 테스트 44/44 통과. Windows 클라이언트 포함 전체 솔루션 빌드는
+> [CI](.github/workflows/ci.yml)의 `build-windows` 잡에서 매 푸시마다 검증된다.
 
 ### Phase 0 관측 도구 실행 (Windows)
 
