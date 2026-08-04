@@ -1,8 +1,13 @@
+using System.Security.Cryptography;
+using System.Text;
 using ChoPilot.Core;
 
 namespace ChoPilot.Mapping;
 
-public sealed record GuideHint(string Type, string Text, bool Actionable);
+/// <summary>
+/// 다음작업 힌트 1건. <paramref name="Id"/>는 제안의 <b>정체성</b>이고 <paramref name="Subject"/>는 그 대상 개념이다.
+/// </summary>
+public sealed record GuideHint(string Id, string Type, string Subject, string Text, bool Actionable);
 
 /// <summary>Guide 조회 응답 (PHASE1-DESIGN §4.3). 읽기 전용 — 힌트는 실행 불가(Actionable=false).</summary>
 public sealed record GuideResult(
@@ -50,7 +55,12 @@ public static class GuideService
 
         var hints = required
             .Where(c => !filledConcepts.Contains(c))
-            .Select(c => new GuideHint("guide", $"{Label(c)} 입력이 남았습니다", Actionable: false))
+            .Select(c => new GuideHint(
+                Id: SuggestionId(entry.BusinessObject, "guide", c),
+                Type: "guide",
+                Subject: c,
+                Text: $"{Label(c)} 입력이 남았습니다",
+                Actionable: false))
             .ToList();
 
         var record = entry.RecordId?.Value is { Length: > 0 } v ? $" {v}" : "";
@@ -58,6 +68,22 @@ public static class GuideService
 
         return new GuideResult(entry.BusinessObject, summary, bo.Fields, filled, req, ratio,
             hints, bo.Confidence, bo.Provenance);
+    }
+
+    /// <summary>
+    /// 제안 식별자. (업무객체, 종류, 대상)에서 <b>결정적으로</b> 유도한다 — 렌더마다 새로 뽑지 않는다.
+    ///
+    /// <para>
+    /// 측정하려는 것이 "이 렌더가 클릭됐는가"가 아니라 "<b>이 제안이 쓸모 있는가</b>"이기 때문이다.
+    /// 렌더마다 난수 ID를 발급하면 세션·사용자를 가로지르는 집계가 불가능해지고, 수락률이
+    /// 화면 새로고침 횟수에 좌우된다. 노출의 맥락(누가·어느 관측에서 봤는지)은 ID가 아니라
+    /// 노출 레코드가 들고 있다.
+    /// </para>
+    /// </summary>
+    public static string SuggestionId(string businessObject, string type, string subject)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"{businessObject}|{type}|{subject}"));
+        return "sg:" + Convert.ToHexString(hash)[..12].ToLowerInvariant();
     }
 
     private static string Label(string concept) =>

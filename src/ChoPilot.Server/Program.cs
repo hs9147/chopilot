@@ -23,6 +23,7 @@ builder.Services.AddSingleton<ObservationStore>();
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddSingleton<UepStore>();
 builder.Services.AddSingleton<DecisionLog>();
+builder.Services.AddSingleton<SuggestionFeedbackStore>();
 builder.Services.AddSingleton<PersonalizationService>();
 
 // 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
@@ -89,12 +90,19 @@ app.MapPost("/v1/observations",
     });
 });
 
-app.MapGet("/v1/guide", (string observation_id, ObservationStore store) =>
+app.MapGet("/v1/guide", (string observation_id, ObservationStore store, SuggestionFeedbackStore suggestions) =>
 {
     var rec = store.Get(observation_id);
-    return rec is null
-        ? Results.NotFound(new { error = "unknown observation_id" })
-        : Results.Ok(GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject));
+    if (rec is null) return Results.NotFound(new { error = "unknown observation_id" });
+
+    var guide = GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject);
+
+    // 제안이 사용자에게 나갔다는 사실을 남긴다 — 수락률의 분모(ARCHITECTURE §9).
+    // 사용자는 헤더가 아니라 관측이 정한다: 가이드는 그 관측을 만든 사람의 것이다.
+    suggestions.RecordImpressions(rec.Event.UserId, observation_id, rec.Entry.Signature,
+        guide.BusinessObject, guide.NextHints, DateTimeOffset.UtcNow);
+
+    return Results.Ok(guide);
 });
 
 // 감사 로그 조회(읽기 전용). 운영은 접근통제(IAM) 하에 노출.
@@ -186,6 +194,34 @@ app.MapPost("/v1/correction",
         $"{entry.BusinessObject}: {string.Join(", ", entry.Mapping.Select(m => m.Concept))}");
     return Results.Ok(entry);
 });
+
+// ── 제안 판단 (ARCHITECTURE §9 KPI '제안 수락률') ───────────────────────────
+// 사용자가 제안을 수락했는지 거부했는지 보고한다. 무시는 보고하지 않는다 — 판단의 부재가 곧 무시다.
+app.MapPost("/v1/suggestions/feedback",
+    (HttpRequest request, SuggestionFeedbackRequest req, SuggestionFeedbackStore suggestions) =>
+{
+    if (RequestUser.From(request) is not { } userId)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var outcome = SuggestionOutcome.Normalize(req.Outcome);
+    if (!SuggestionOutcome.IsDecision(outcome))
+        return Results.BadRequest(new
+        {
+            error = $"outcome must be '{SuggestionOutcome.Accepted}' or '{SuggestionOutcome.Rejected}'",
+            outcome = req.Outcome,
+        });
+
+    var decided = suggestions.Decide(
+        userId, req.ObservationId, req.SuggestionId, outcome, DateTimeOffset.UtcNow);
+
+    return decided is null
+        ? Results.NotFound(new { error = "이 사용자에게 보여준 적 없는 제안이다" })
+        : Results.Ok(decided);
+});
+
+// 수락률 집계 + 노출·판단 원자료. 운영은 접근통제(IAM) 하에 노출.
+app.MapGet("/v1/suggestions", (SuggestionFeedbackStore suggestions, int? limit) =>
+    Results.Ok(new { stats = suggestions.Stats(), records = suggestions.Snapshot(limit ?? 100) }));
 
 // 검수·보정 결정 이력(읽기 전용). 운영은 접근통제(IAM) 하에 노출.
 app.MapGet("/v1/decisions", (DecisionLog decisions, int? limit) =>
