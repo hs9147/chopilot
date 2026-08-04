@@ -25,6 +25,23 @@ public static class ProcurementOntology
         new("OrderNo",      "string", new[] { "발주번호", "po no" }),
     };
 
+    /// <summary>개념 <b>이름</b>만 정확일치로 조회. 별칭은 보지 않는다.</summary>
     public static Concept? ByName(string name) =>
         Array.Find(Concepts, c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// 이름 <b>또는 별칭</b>으로 조회. 사람이 입력한 개념을 해석할 때 쓴다.
+    /// 사용자는 화면에 보이는 라벨("단가")로 말하지 개념명("UnitPrice")으로 말하지 않는다.
+    /// 별칭을 못 찾으면 그 개념의 <c>Sensitive</c> 여부를 알 수 없게 되므로,
+    /// 호출측은 null을 <b>거부</b>해야 한다 — 민감하지 않다고 단정하면 안 된다.
+    /// </summary>
+    public static Concept? Resolve(string? nameOrAlias)
+    {
+        if (string.IsNullOrWhiteSpace(nameOrAlias)) return null;
+        var needle = nameOrAlias.Trim();
+
+        return ByName(needle)
+            ?? Array.Find(Concepts, c =>
+                   c.Aliases.Any(a => a.Equals(needle, StringComparison.OrdinalIgnoreCase)));
+    }
 }

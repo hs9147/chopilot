@@ -29,24 +29,26 @@
 
 > **요구:** Windows + .NET 8 SDK. (UIA는 Windows 전용 → 클라이언트는 `net8.0-windows`)
 > 상세 환경설정·AWS 자격증명·트러블슈팅은 **[SETUP.md](SETUP.md)** 참조.
-> 이 저장소는 현재 문서 환경에 dotnet이 없어 빌드 검증되지 않았다. 개발 PC에서 아래로 빌드한다.
+> 빌드·테스트는 매 푸시마다 [CI](.github/workflows/ci.yml)가 Linux·Windows 양쪽에서 검증한다.
 
 ```
 src/
   ChoPilot.Core/       모델, SignatureService, PrivacyGate, Ontology,
                        ScreenIdentifier(레코드 식별), ConsentPolicy(on/off·제외),
-                       EventSpool(durable 재전송 스풀),
+                       EventSpool(durable 재전송 스풀), Uep(개인 프로파일),
                        Uploader + ObservationDispatcher(전송·스풀 정책) (net8.0, 크로스플랫폼)
   ChoPilot.Mapping/    MappingCache, MappingResolver, StubAiMapper,
                        BedrockAiMapper, PromptBuilder,
                        BusinessObjectBuilder, GuideService             (net8.0)
   ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
-  ChoPilot.Server/     Ingestion + Guide + Audit + Metrics (읽기전용 API)
+  ChoPilot.Server/     Ingestion + Guide + Audit + Metrics
+                       + UEP/검수(HITL)/개인 보정 + DecisionLog
                        + wwwroot/ 측정 콘솔 (Phase 0 실측 UI)          (net8.0, ASP.NET)
 tests/
   ChoPilot.Tests/      Signature/Privacy/Stub/Bedrock/Guide +
                        ScreenIdentifier/Consent/EventSpool/Resolver +
                        Uploader/Dispatcher(전송 유실 방지) +
+                       UEP/검수/개인 보정 + 캐스케이드 격리 +
                        Server end-to-end + Metrics                     (net8.0, 크로스플랫폼)
 ```
 
@@ -56,9 +58,9 @@ tests/
 
 ```bash
 dotnet build         # net8.0 4개(Core/Mapping/Server/Tests) + net8.0-windows 클라이언트
-dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 44개 검증
+dotnet test          # Windows/AWS 불요 — 순수 로직 + 서버 end-to-end 73개 검증
 ```
-> 빌드 0 경고 / 0 오류, 테스트 44/44 통과. Windows 클라이언트 포함 전체 솔루션 빌드는
+> 빌드 0 경고 / 0 오류, 테스트 73/73 통과. Windows 클라이언트 포함 전체 솔루션 빌드는
 > [CI](.github/workflows/ci.yml)의 `build-windows` 잡에서 매 푸시마다 검증된다.
 
 ### Phase 0 관측 도구 실행 (Windows)
@@ -114,6 +116,32 @@ curl localhost:5080/v1/observations  # 스냅샷 목록 + 인벤토리 집계
 
 가설별 측정 절차·채점 기준·함정은 **[PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md)** 에 있다.
 스냅샷을 서버로 재생하면 Windows 없이도 H3b·H6를 반복 측정할 수 있다.
+
+### 개인화 · 검수(HITL) API
+
+2-Plane 지식 모델(D5, ARCHITECTURE §5.4)과 저신뢰 매핑 검수(§5.2 step 6).
+Phase 1은 **축적과 보정까지** — 개인화 도출(다음작업·자동화)은 Phase 3.
+
+```bash
+U="X-ChoPilot-User: alice"
+
+curl -H "$U" localhost:5080/v1/uep          # 내 화면 사용 빈도/최근성 (UEP)
+curl        localhost:5080/v1/review        # 검수 큐 (pending_review, 개인 스코프 제외)
+curl -H "$U" -X POST localhost:5080/v1/review/promote -d '{...}'  # 검수 통과 → trusted
+curl -H "$U" -X POST localhost:5080/v1/correction     -d '{...}'  # 개인 보정
+curl        localhost:5080/v1/decisions     # 승격·보정 결정 이력 (누가 언제)
+```
+
+- **개인 보정은 `personal:<user>` 스코프에만 적재**되고 캐스케이드에서 1순위로 적중한다 →
+  같은 화면 재방문 시 AI를 호출하지 않는다. 다른 사용자에게는 영향이 없다.
+- 보정 개념은 **이름과 별칭 모두** 받는다(`단가` → `UnitPrice`). 온톨로지에 없는 개념은
+  민감 여부를 알 수 없으므로 **400으로 거부**한다 — 통과시키면 `Sensitive=false`로 굳어져
+  Business Object의 민감값 억제가 무력화된다.
+
+> ⚠️ **`X-ChoPilot-User`는 인증이 아니다.** 헤더 값을 그대로 신뢰한다.
+> 개인 스코프의 읽기·쓰기가 본문·쿼리가 아닌 **한 곳(`RequestUser`)만 통과**하도록 좁혀 둔
+> 자리이며, 실제 인증(mTLS/OIDC)이 들어갈 seam이다. 그때까지 이 서버를 신뢰 경계 밖에
+> 노출하면 안 된다(ARCHITECTURE §8: VPC 내부, mTLS).
 
 ### Bedrock 동적 매핑
 
