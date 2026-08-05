@@ -47,6 +47,9 @@
 | `BusinessObjectBuilder` | 매핑 적용 → Business Object 생성 |
 | `GuideService` | 현재 업무 요약 + 다음작업 힌트(규칙+Bedrock) |
 | `AuditService` | 관측·판단 이력(불변) |
+| `KnowledgeStore` | Plane 3 지식 문서 저장·수명주기(제출→승인→게시→폐기) + 컴파일(온톨로지·Guide 규칙·업무객체 힌트). 온톨로지는 이제 코드가 아니라 여기서 나온다 |
+| `AxisAggregator` | 4축 신호 집계 → 지식 초안 생성 (Phase 2 — 스키마만 선반영) |
+| `KnowledgeEditor` | LLM이 집계를 문서 초안으로 서술 (Phase 2 — 일 배치) |
 
 ---
 
@@ -153,12 +156,33 @@ resolve(signature, user_id):
 - 보여준 적 없는 제안은 `404`. 분모 없는 분자는 KPI를 무의미하게 만든다.
 - 집계는 `GET /v1/suggestions` — **수락률**(명시적 판단 중 수락)과 **응답률**(노출 중 판단)을 분리해 낸다.
 
+### 4.5 지식 수명주기 — `/v1/knowledge` (ARCHITECTURE §5.5)
+
+```
+GET  /v1/knowledge                 # 문서 목록(axis·status 필터) + 현재 지식 버전. personal 스코프는 헤더 사용자만
+GET  /v1/knowledge/{id}            # 문서 1건
+POST /v1/knowledge                 # 초안 제출 → pending_review (헤더 사용자 = 작성자)
+POST /v1/knowledge/{id}/approve    # 게시 (헤더 사용자 = 승인자, DecisionLog 기록, 버전 증가)
+POST /v1/knowledge/{id}/deprecate  # 폐기 (개념이면 해당 매핑 필드 제거·강등, 버전 증가)
+```
+
+- **삭제는 없다.** 폐기만 있고, 폐기된 문서는 이력으로 남는다. 민감 개념도 폐기만 가능하다.
+- 승인 시 검증: 민감 개념의 **민감 → 비민감 하향은 거부**된다(마스킹 2차 방어선 보호).
+- 개념 **추가**는 기존 매핑에 영향이 없다. 개념 **폐기**는 그 개념을 쓰는 매핑에서 해당 필드를
+  제거하고, 남은 필드의 신뢰도가 θ 미만이면 `pending_review`로 강등한다.
+- `/v1/ontology`는 이제 하드코딩이 아니라 **게시된 지식의 컴파일 결과**를 서빙한다.
+
 ---
 
 ## 5. 데이터 모델 (개인화 선반영)
 
 - **매핑 캐시 엔트리**: [PHASE0-KIT.md](PHASE0-KIT.md) §3.1 구조 재사용 — `signature`·**`scope`**·**`user_id`**·`mapping[]`·`confidence`·`status`.
 - **Business Object**: [ARCHITECTURE.md](ARCHITECTURE.md) §4.2.
+- **지식 문서(KnowledgeDoc, Plane 3)**: `id`(예: `concept.UnitPrice`, `rule.required.PurchaseRequest`) ·
+  `axis`(user|item|domain|foundation) · `kind`(view|curated) · `type`(concept|required_fields|business_hint|note) ·
+  `scope`(D5 재사용) · 타입별 페이로드 · `body`(서술 — **관측 값 금지**) · `version` · `status`(pending_review|published|deprecated) ·
+  `provenance`(근거 신호 · SupportCount · DistinctUsers) · `approvedBy`(curated 게시엔 필수).
+  게시·폐기마다 **지식 버전**이 증가하고, `MappingEntry.OntologyVersion`과 대조되어 재추론 백오프를 만료시킨다(ARCHITECTURE §5.5).
 - **UEP(Phase 1)**: `user_id` → { 화면 사용 빈도/최근성, **화면 전이 그래프**, 개인 보정 매핑 }.
   - **전이** `(from → to, count, medianGapSeconds, lastSeen)` — "무엇 다음에 무엇을 하는가". 빈도만으로는
     다음 작업을 말할 수 없어서 따로 쌓는다. 세 가지를 걸러낸다:

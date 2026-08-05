@@ -132,6 +132,7 @@ Status : Design
   "user_id": "hashed-user-id",
   "source": "web | mail | doc",
   "captured_at": "ISO-8601",
+  "trigger": "focus_changed | structure_changed | save_clicked | null",  // 예약 — 완료 신호(§11)
   "app": { "name": "SAP GUI", "window_title": "...", "screen_id": "ME51N" },
   "payload": { /* source별 정규화 구조 */ },
   "privacy": { "masked_fields": ["..."], "policy_version": "1.3" }
@@ -161,6 +162,7 @@ Task ─writes─ ERPRecord
 Mail ─from/to─ Person
 Company ─owns─ (Mail | Document | ERPRecord)
 ERPRecord ─about─ Company        // "협력사코드 00231" ↔ "A사"
+KnowledgeDoc ─about─ (Concept | Screen | Company | ...)   // §5.4 Plane 3 문서의 대상 연결
 ```
 > **초기 저장소:** Aurora PostgreSQL(관계형 + 재귀 CTE)로 시작. 그래프 순회 부하가 커지면 Neptune/Neo4j로 이관. **그래프 "모델"이 자산이지 DB 엔진이 아니다.**
 
@@ -172,10 +174,14 @@ ERPRecord ─about─ Company        // "협력사코드 00231" ↔ "A사"
 
 ### 5.1 3층 구조 (역할 재정의)
 ```
-Layer A. Core Ontology   : 도메인 공통 개념 (Material, Quantity, Vendor, Approval ...) — 고정 자산
-Layer B. Mapping Cache   : 화면 서명(signature)별 AI 도출 매핑 + 신뢰도 + 검수상태
-                            → App Adapter Registry(DynamoDB). 규칙이 아니라 "학습된 캐시"
-Layer C. AI Inference    : 캐시 미스/신뢰도 미달/화면 변경 시 Bedrock이 트리→개념 매핑 추론
+Layer A. Curated Knowledge : 온톨로지·업무 규칙 — 버전 관리되는 큐레이션 지식.
+                              관측 신호에서 초안이 생성되고 사람이 승인하면 게시되며(§5.5),
+                              게시본이 컴파일되어 Layer C의 프롬프트와 Guide 규칙이 된다.
+                              "고정"이 아니라 "느리게, 승인을 거쳐 변한다".
+Layer B. Mapping Cache     : 화면 서명(signature)별 AI 도출 매핑 + 신뢰도 + 검수상태
+                              → App Adapter Registry(DynamoDB). 규칙이 아니라 "학습된 캐시"
+Layer C. AI Inference      : 캐시 미스/신뢰도 미달/화면 변경 시 Bedrock이 트리→개념 매핑 추론.
+                              Layer A의 버전이 바뀌면 저신뢰 매핑의 재추론 백오프가 즉시 만료된다.
 ```
 
 ### 5.2 런타임 파이프라인
@@ -199,22 +205,34 @@ Layer C. AI Inference    : 캐시 미스/신뢰도 미달/화면 변경 시 Bedr
 - **신뢰도 임계치** 미달 매핑은 도메인 전문가 검수 후 "trusted" 승격(HITL, 선택).
 - 화면 명세 문서 = AI few-shot 시드 + 검수 기준(정적 규칙 아님).
 
-> **핵심 전환:** "사람이 규칙을 작성" → "**AI가 규칙을 생성하고 시스템이 캐싱·자가치유**". 동적 환경에서 유지보수 비용을 근본적으로 낮춘다.
+> **핵심 전환:** 구조 지식(Layer B)은 "사람이 규칙을 작성" → "**AI가 규칙을 생성하고 시스템이 캐싱·자가치유**".
+> 의미 지식(Layer A)은 "사람이 코드에 지식을 작성" → "**시스템이 관측에서 초안을 만들고 사람이 승인**"(§5.5).
+> 어느 쪽도 지식이 배포 주기에 묶이지 않는다 — 이것이 "지식 체계를 모방하여 코딩하는 것이 아니라
+> 지식 체계를 형성하고 유지보수하는 시스템"의 구현이다.
 
-### 5.4 2-Plane 지식 모델 — 사용자별 환경·로직 축적·도출 (D5)
+### 5.4 3-Plane 지식 모델 — 사용자별 환경·로직 축적·도출 (D5)
 
-사용자마다 환경(쓰는 앱·화면·데이터·업무 습관)이 다르다. 지식을 **공유 가능한 것**과 **개인 고유한 것**으로 분리해, 효율(공유)과 개인화(격리)를 동시에 달성한다.
+사용자마다 환경(쓰는 앱·화면·데이터·업무 습관)이 다르다. 지식을 **공유 가능한 것**과 **개인 고유한 것**,
+그리고 **사람이 승인한 것**으로 분리해, 효율(공유)·개인화(격리)·신뢰(큐레이션)를 동시에 달성한다.
 
 ```
-Plane 1. Shared Structural Plane  (전역/조직 공유)
+Plane 1. Shared Structural Plane  (전역/조직 공유 — 기계 유지)
    - 화면 서명 → 개념 매핑 (Adaptive Mapping 캐시)
    - 근거: 화면 "구조"는 사용자 사적 정보가 아님 → 공유가 콜드스타트·효율에 유리
    - 스코프: Global(전사) · Org(부서/역할)
 
-Plane 2. Personal Adaptive Plane  (사용자별 격리) ★
+Plane 2. Personal Adaptive Plane  (사용자별 격리 — 기계 유지) ★
    - User Environment Profile(UEP): 자주 쓰는 화면·빈도/최근성, 개인 엔티티 별칭
-     (예: 이 사용자의 거래처 약어), 워크플로 습관(화면 전이 패턴), 선호·보정 이력
+     (예: 이 사용자의 거래처 약어), 워크플로 습관(화면 전이 패턴), 선호·보정 이력,
+     제안 수락/거부 판단 기록
    - Personal Work Graph: 이 사용자의 Project/Task/Mail/Doc (본래 개인 격리)
+
+Plane 3. Curated Knowledge Plane  (사람 승인 지식 — 4축) ★신설
+   - 축: 사용자(personal 파생 뷰) · 업무/품목(org) · 도메인/구매(org) · 기반 정보(global 시드)
+   - Plane 1·2가 "관측이 쌓이는 곳"이라면 Plane 3은 "관측이 지식으로 응결되는 곳"(§5.5)
+   - 게시본은 컴파일되어 온톨로지(Layer A)·Guide 규칙·AI 프롬프트의 원천이 된다
+   - 문서 종류: view(스토어에서 자동 재생성 — 편집·승인 불가) / curated(사람 승인 필수)
+   - 불변식: 문서에는 관측된 "값"이 들어가지 않는다 — 구조·의미·규칙만 (§8 마스킹과 별개의 2차 방어선)
 ```
 
 **로직 도출 (Derivation Cascade)** — 현재 환경(활성 화면 + 사용자 맥락)에 맞는 로직을 계층 병합으로 도출:
@@ -227,9 +245,39 @@ DerivedLogic = resolve( Personal ▷ Org ▷ Global )      // 개인 > 조직 > 
 
 **피드백 학습 루프:** 사용자가 제안(매핑/다음작업/자동화)을 수락·수정·거부한 신호를 UEP에 축적 → 개인 레이어가 점점 그 사용자의 방식에 수렴. 공통적으로 반복되면 Org/Global로 승격 검토.
 
+**승격 사다리 (Plane 2 → 3):** 개인 패턴이 조직 지식이 되는 유일한 경로.
+```
+Plane 2 개인 패턴 ──(k인 이상 반복 관측 + 사적정보 제거)──▶ Plane 3 org 초안
+                 ──(사람 승인)──▶ 게시 ──(컴파일)──▶ 온톨로지·규칙·프롬프트
+```
+단일 사용자에게서만 관측된 패턴은 org로 오르지 못한다 — 그 사람의 활동이 유출되기 때문이다(아래 승격 게이트와 동일 원칙).
+
 **콜드→웜 스타트:** 신규 사용자는 Global/Org 지식으로 즉시 동작(콜드스타트), 사용할수록 Personal 레이어가 정밀화(웜스타트).
 
 **격리·거버넌스:** Plane 2는 **사용자별 데이터 격리**(§8 멀티테넌시). Plane 1로의 승격은 **사적 정보가 제거된 구조 지식만** 허용(승격 게이트).
+
+### 5.5 지식 형성 루프 — 쓰기 경로 (§5.2와 대칭)
+
+§5.2가 관측당 실행되는 **읽기 경로**라면, 이 루프는 배치로 실행되는 **쓰기 경로**다.
+AI 호출은 3단계에만 있고 비용은 관측 수가 아니라 **엔티티 수에 비례**한다 — 읽기 경로의
+호출 구조(캐시·백오프)는 이 루프의 존재와 무관하게 유지된다.
+
+```
+1. Signal    : 검수 큐(저신뢰 매핑) · 보정에서 거부된 미지 개념 · 반복 거부된 제안 ·
+               교차 사용자 전이 (배치 수집)
+2. Aggregate : 축별 결정적 집계 — LLM 없음. 지지도(minCount)·k인(DistinctUsers) 임계 적용
+3. Draft     : LLM 편집자가 집계를 문서 초안으로 서술 (일 배치)
+4. Review    : 초안 → pending_review → 사람 승인 (기존 HITL 재사용, DecisionLog 기록)
+5. Publish   : 게시 + 지식 버전 증가
+6. Compile   : 게시본 → 온톨로지(Layer A)·Guide 규칙·AI 프롬프트 재생성
+7. Invalidate: 버전 변경 → 저신뢰 매핑의 재추론 백오프 즉시 만료(선택적 재추론).
+               개념 "추가"는 기존 매핑을 무효화하지 않는다 — 의미 변경·폐기만 해당 매핑을
+               pending_review로 강등한다. 민감 개념은 삭제 불가, 폐기(deprecate)만 가능하다.
+```
+
+> 사람이 개입하는 지점은 4(승인)뿐이지만, 그 지점이 전부다 — **LLM 자동 게시는 없다.**
+> 신뢰도 1.0으로 캐스케이드 상위를 차지하는 지식은 반드시 사람 서명을 거친다는
+> 개인 보정의 원칙이 조직 지식에도 그대로 적용된다.
 
 ---
 
@@ -275,6 +323,7 @@ Guide → Validation(Dry-run) → [Human Approval] → Automation → Verify(Vis
 | 보존/파기 | 이벤트·임베딩·원본별 보존기간(TTL), 사용자 삭제 요청 처리 경로 |
 | 접근통제 | IAM 최소권한, **사용자별 데이터 격리(필수, D5)** — Personal Plane(§5.4)은 사용자 간 격리, Shared Plane 승격은 사적정보 제거 후에만 |
 | 감사 | CloudTrail + 앱 감사로그, 자동화 액션 전량 기록 |
+| 지식 승인 | Plane 3 게시·폐기(§5.5)는 온톨로지·규칙을 영구히 바꾼다 — 실제 인증(mTLS/OIDC) 도입 시 **승인 엔드포인트가 1순위 보호 대상** |
 
 ---
 
@@ -288,6 +337,8 @@ Guide → Validation(Dry-run) → [Human Approval] → Automation → Verify(Vis
 | **화면 변경 자가치유** | 화면 변경 감지→재추론 성공률 | ≥ 95% | 서명 변경 후 `source=ai` |
 | **개인화 수렴** | 웜스타트(개인축적 후) vs 콜드스타트 정확도·수락률 개선폭 | 유의미 향상 | `/v1/suggestions` 시계열 |
 | **제안 수락률** | 도출 로직(다음작업/자동화) 사용자 수락 비율 | 상승 추세 | `/v1/suggestions.acceptanceRate` |
+| **지식 초안 승인률** | 관측에서 생성된 지식 초안 중 사람이 승인한 비율(§5.5) | 상승 추세 | `/v1/knowledge` 집계 |
+| **온톨로지 성장** | 게시된 개념·규칙 수와 버전 (배포 없이 성장하는가) | 증가 | `/v1/knowledge.version` |
 | 연결 정밀도 | Entity Resolver 정탐/오탐 | Precision ≥ 0.9 | 미구현 |
 | 업무 인식 정확도 | "현재 업무" 판정 정확률(사람 라벨 대비) | ≥ 80% | 수기 채점 |
 | 자동화 성공률 | 승인된 워크플로 무개입 완료율 | ≥ 95% | 미구현(Phase 4) |
@@ -331,3 +382,5 @@ Guide → Validation(Dry-run) → [Human Approval] → Automation → Verify(Vis
 - 사용자 규모 → Aurora vs OpenSearch/Neptune 분기 시점
 - ~~멀티테넌시 필요 여부~~ → **확정: 사용자별 격리 필수(D5)**. 남은 결정은 격리 입도(사용자/부서/법인)와 Shared Plane 승격 정책·검수 주체
 - 개인화 레이어 저장 위치(UEP 스키마: Aurora vs 별도 스토어)와 피드백 신호 보존기간
+- **지식 문서 저장소**(§5.4 Plane 3) — PoC는 코드 시드 + 인메모리, 운영은 Aurora(버전·감사 이력 포함) 예정. 지식 초안 생성기(축별 집계·LLM 편집자)의 실행 주기와 비용 상한
+- **작업 완료 신호** — 도메인 축 규칙 검증(필수 필드 학습)에 필요. 이벤트 계약에 `trigger` 필드는 예약됨(§4.1), 클라이언트 구현(저장 버튼 관측 vs 전이 기반 추정)은 미정
