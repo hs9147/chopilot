@@ -268,7 +268,7 @@ public class GuideServiceTests
             Confidence: 0.93, Status: "trusted");
 
         var bo = BusinessObjectBuilder.Build(entry, tree);
-        var guide = GuideService.Build(entry, tree, bo);
+        var guide = GuideService.Build(entry, tree, bo, KnowledgeSeed.Compile());
 
         Assert.Equal("PurchaseRequest", guide.BusinessObject);
         Assert.Contains("PR123", guide.Summary);

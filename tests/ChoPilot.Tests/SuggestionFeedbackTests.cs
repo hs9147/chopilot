@@ -35,7 +35,7 @@ public class SuggestionIdTests
     public void Build_AssignsIdAndSubject_ToEveryHint()
     {
         var (entry, tree) = Fixtures.PartiallyFilledPurchaseRequest();
-        var guide = GuideService.Build(entry, tree, BusinessObjectBuilder.Build(entry, tree));
+        var guide = GuideService.Build(entry, tree, BusinessObjectBuilder.Build(entry, tree), KnowledgeSeed.Compile());
 
         var hint = Assert.Single(guide.NextHints);
         Assert.Equal("DeliveryDate", hint.Subject);

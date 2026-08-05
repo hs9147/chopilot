@@ -58,7 +58,7 @@ public sealed class MappingResolver
 
     public async Task<ResolveResult> ResolveAsync(
         string signature, string userId, ScreenInfo screen, UiNode tree,
-        Concept[] ontology, string businessHint, CancellationToken ct = default)
+        CompiledKnowledge knowledge, string businessHint, CancellationToken ct = default)
     {
         MappingEntry? lowConfidence = null;
 
@@ -79,20 +79,22 @@ public sealed class MappingResolver
         // θ=0.5에서는 1회). 예열 문제가 아니라 영구적인 상태다.
         //
         // 같은 트리·같은 온톨로지·같은 모델에 다시 물으면 대체로 같은 답이 온다 → 즉시 재추론은 낭비다.
-        // 재추론이 의미 있는 건 온톨로지나 모델이 바뀐 뒤이고, 그건 배포 단위 사건이지 관측 단위가 아니다.
-        // 그래서 시간 백오프를 둔다. 신뢰도를 실제로 끌어올리는 길은 재추론이 아니라
-        // 사람의 검수·보정이다(/v1/review, /v1/correction — 보정 후 호출량은 0으로 떨어진다).
+        // 재추론이 의미 있는 건 온톨로지나 모델이 바뀐 뒤다 — 그래서 백오프는 시간과 함께
+        // 지식 버전을 본다: 추론 당시 버전과 현재 버전이 다르면 백오프를 무시하고 다시 묻는다
+        // (개념이 추가·폐기됐으니 같은 트리라도 답이 달라질 수 있다).
+        // 신뢰도를 실제로 끌어올리는 길은 여전히 사람의 검수·보정이다(/v1/review, /v1/correction).
         var now = _clock();
         var target = _cache.Get(signature, "global");   // AI 결과가 덮어쓸 자리
         if (lowConfidence is not null &&
             target?.LastInferredAt is { } lastInferred &&
+            target.OntologyVersion == knowledge.Version &&
             now - lastInferred < _reinferAfter)
         {
             return new ResolveResult(lowConfidence, Source.DeferredCache);
         }
 
-        // 캐시 미스 / 백오프 만료 → AI 동적 매핑
-        var inference = await _ai.InferAsync(businessHint, tree, ontology, ct);
+        // 캐시 미스 / 백오프 만료 / 지식 버전 변경 → AI 동적 매핑
+        var inference = await _ai.InferAsync(businessHint, tree, knowledge.Concepts, ct);
         var confidence = inference.Fields.Count == 0
             ? 0
             : inference.Fields.Average(f => f.Confidence);
@@ -106,7 +108,8 @@ public sealed class MappingResolver
             Mapping: inference.Fields,
             Confidence: confidence,
             Status: confidence >= _thetaHigh ? "trusted" : "pending_review",
-            LastInferredAt: now);
+            LastInferredAt: now,
+            OntologyVersion: knowledge.Version);
 
         _cache.Put(entry);
         return new ResolveResult(entry, Source.Ai, inference.InputTokens, inference.OutputTokens);

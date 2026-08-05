@@ -24,24 +24,19 @@ public sealed record GuideResult(
 /// <summary>
 /// 현재 업무 요약 + 진행률 + 다음작업 힌트를 도출 (PHASE1-DESIGN §2.2 GuideService).
 /// Phase 1은 가이드만 — 자동화(Actionable) 없음.
+/// 필수 필드 규칙과 개념 별칭은 하드코딩이 아니라 <see cref="CompiledKnowledge"/>에서 온다 —
+/// 규칙 문서가 게시되면 재배포 없이 가이드가 바뀐다(ARCHITECTURE §5.5).
 /// </summary>
 public static class GuideService
 {
-    /// <summary>업무객체별 필수 개념. 미정의 시 매핑된 개념 전체를 필수로 간주.</summary>
-    private static readonly Dictionary<string, string[]> RequiredByBo = new()
-    {
-        ["PurchaseRequest"] = new[] { "Material", "Quantity", "DeliveryDate", "Vendor" },
-        ["PurchaseOrder"] = new[] { "OrderNo", "Vendor", "TotalAmount" },
-    };
-
-    public static GuideResult Build(MappingEntry entry, UiNode tree, BusinessObject bo)
+    public static GuideResult Build(MappingEntry entry, UiNode tree, BusinessObject bo, CompiledKnowledge knowledge)
     {
         var byRef = new Dictionary<string, UiNode>();
         Index(tree, byRef);
 
-        var required = RequiredByBo.TryGetValue(entry.BusinessObject, out var r)
-            ? r
-            : entry.Mapping.Select(m => m.Concept).Distinct().ToArray();
+        // 규칙 미정의 업무객체는 매핑된 개념 전체를 필수로 간주(폴백).
+        var required = knowledge.RequiredFor(entry.BusinessObject)
+            ?? entry.Mapping.Select(m => m.Concept).Distinct().ToArray();
 
         // 값이 채워진 개념 (마스킹된 민감필드는 값이 있으므로 '채움'으로 계수, block만 제외)
         var filledConcepts = entry.Mapping
@@ -59,7 +54,7 @@ public static class GuideService
                 Id: SuggestionId(entry.BusinessObject, "guide", c),
                 Type: "guide",
                 Subject: c,
-                Text: $"{Label(c)} 입력이 남았습니다",
+                Text: $"{Label(knowledge, c)} 입력이 남았습니다",
                 Actionable: false))
             .ToList();
 
@@ -118,8 +113,8 @@ public static class GuideService
         return "sg:" + Convert.ToHexString(hash)[..12].ToLowerInvariant();
     }
 
-    private static string Label(string concept) =>
-        ProcurementOntology.ByName(concept)?.Aliases.FirstOrDefault() ?? concept;
+    private static string Label(CompiledKnowledge knowledge, string concept) =>
+        knowledge.ByName(concept)?.Aliases.FirstOrDefault() ?? concept;
 
     private static void Index(UiNode node, Dictionary<string, UiNode> map)
     {

@@ -176,8 +176,8 @@ public class MappingResolverCacheTests
         });
         var sig = SignatureService.Compute(screen, tree);
 
-        var r1 = await resolver.ResolveAsync(sig, "user1", screen, tree, ProcurementOntology.Concepts, "PurchaseRequest");
-        var r2 = await resolver.ResolveAsync(sig, "user1", screen, tree, ProcurementOntology.Concepts, "PurchaseRequest");
+        var r1 = await resolver.ResolveAsync(sig, "user1", screen, tree, KnowledgeSeed.Compile(), "PurchaseRequest");
+        var r2 = await resolver.ResolveAsync(sig, "user1", screen, tree, KnowledgeSeed.Compile(), "PurchaseRequest");
 
         Assert.False(r1.CacheHit);
         Assert.True(r2.CacheHit);                 // 고신뢰 매핑 → 캐시 재사용

@@ -26,6 +26,14 @@ builder.Services.AddSingleton<DecisionLog>();
 builder.Services.AddSingleton<SuggestionFeedbackStore>();
 builder.Services.AddSingleton<PersonalizationService>();
 
+// Curated Knowledge Plane (ARCHITECTURE §5.4 Plane 3) — 온톨로지·규칙의 런타임 진실.
+builder.Services.AddSingleton<KnowledgeStore>();
+builder.Services.AddSingleton<IKnowledgeProvider>(sp => sp.GetRequiredService<KnowledgeStore>());
+builder.Services.AddSingleton(sp => new KnowledgeService(
+    sp.GetRequiredService<KnowledgeStore>(),
+    sp.GetRequiredService<IMappingCache>(),
+    cfg.GetValue<double?>("Mapping:ThetaHigh") ?? 0.8));
+
 // 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
 builder.Services.AddSingleton(_ => new PrivacyGate(policyVersion: cfg["Privacy:PolicyVersion"] ?? "1.0"));
 
@@ -63,16 +71,18 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/v1/observations",
     async (ObservationEvent evt, MappingResolver resolver, ObservationStore store,
-           AuditService audit, UepStore uep) =>
+           AuditService audit, UepStore uep, IKnowledgeProvider knowledgeProvider) =>
 {
     // 서명→매핑→BO 구간을 계측한다. 캐시 미스(=Bedrock 호출)와 HIT의 차이가 여기서 드러난다.
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
 
+    // 관측 1건은 지식 스냅숏 하나로 처리한다 — 중간에 게시가 일어나도 반쯤 섞이지 않는다.
+    var knowledge = knowledgeProvider.Current;
     var signature = SignatureService.Compute(evt.Screen, evt.Tree);
-    var hint = BusinessHint.FromScreen(evt.Screen);
+    var hint = knowledge.ResolveBusinessHint(evt.Screen);
 
     var res = await resolver.ResolveAsync(
-        signature, evt.UserId, evt.Screen, evt.Tree, ProcurementOntology.Concepts, hint);
+        signature, evt.UserId, evt.Screen, evt.Tree, knowledge, hint);
     var bo = BusinessObjectBuilder.Build(res.Entry, evt.Tree);
 
     var durationMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -98,12 +108,13 @@ app.MapPost("/v1/observations",
 });
 
 app.MapGet("/v1/guide",
-    (string observation_id, ObservationStore store, SuggestionFeedbackStore suggestions, UepStore uep) =>
+    (string observation_id, ObservationStore store, SuggestionFeedbackStore suggestions, UepStore uep,
+     IKnowledgeProvider knowledgeProvider) =>
 {
     var rec = store.Get(observation_id);
     if (rec is null) return Results.NotFound(new { error = "unknown observation_id" });
 
-    var guide = GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject);
+    var guide = GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject, knowledgeProvider.Current);
 
     // 화면 안의 빈칸 힌트 뒤에 "이 화면 다음에 무엇을 하는가"를 붙인다.
     // 화면 하나만 보면 다음 '작업'이 아니라 다음 '입력칸'까지만 말할 수 있다(UEP 전이, D5).
@@ -170,7 +181,71 @@ app.MapGet("/v1/uep", (HttpRequest request, UepStore uep) =>
 });
 
 // 보정 폼이 쓸 개념 목록. 사용자는 "UnitPrice"가 아니라 "단가"로 정정하므로 별칭까지 내려준다.
-app.MapGet("/v1/ontology", () => Results.Ok(new { concepts = ProcurementOntology.Concepts }));
+// 하드코딩이 아니라 게시된 지식의 컴파일 결과다 — 개념 문서가 승인되면 여기 즉시 나타난다.
+app.MapGet("/v1/ontology", (IKnowledgeProvider knowledge) =>
+    Results.Ok(new { version = knowledge.Current.Version, concepts = knowledge.Current.Concepts }));
+
+// ── 지식 수명주기 (ARCHITECTURE §5.5, PHASE1-DESIGN §4.5) ───────────────────
+// 제출 → 승인(게시) → 폐기. 삭제는 없다. 게시·폐기는 온톨로지·규칙을 영구히 바꾸는
+// 판단이므로 헤더 사용자를 요구하고 결정 이력에 남긴다.
+
+app.MapGet("/v1/knowledge", (HttpRequest request, KnowledgeStore store, string? axis, string? status) =>
+{
+    var user = RequestUser.From(request);
+    var items = store.List(axis, status)
+        // personal 스코프 문서는 본인만 본다(D5) — 헤더가 없으면 전부 제외
+        .Where(d => !d.Scope.StartsWith("personal:", StringComparison.Ordinal) ||
+                    d.Scope == $"personal:{user}")
+        .ToList();
+    return Results.Ok(new { version = store.Current.Version, count = items.Count, items });
+});
+
+app.MapGet("/v1/knowledge/{id}", (string id, HttpRequest request, KnowledgeStore store) =>
+{
+    var doc = store.Get(id);
+    if (doc is null) return Results.NotFound(new { error = "unknown knowledge id" });
+    if (doc.Scope.StartsWith("personal:", StringComparison.Ordinal) &&
+        doc.Scope != $"personal:{RequestUser.From(request)}")
+        return Results.NotFound(new { error = "unknown knowledge id" });   // 존재 여부도 숨긴다
+    return Results.Ok(doc);
+});
+
+app.MapPost("/v1/knowledge", (HttpRequest request, KnowledgeDoc doc, KnowledgeService svc) =>
+{
+    if (RequestUser.From(request) is not { } author)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var (draft, error) = svc.Submit(doc, author);
+    return draft is null ? Results.BadRequest(new { error }) : Results.Ok(draft);
+});
+
+app.MapPost("/v1/knowledge/{id}/approve",
+    (string id, HttpRequest request, KnowledgeService svc, DecisionLog decisions) =>
+{
+    if (RequestUser.From(request) is not { } approver)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var (doc, error) = svc.Approve(id, approver);
+    if (doc is null) return Results.BadRequest(new { error });
+
+    decisions.Record("knowledge_publish", approver, doc.Id, doc.Scope, 1.0,
+        $"{doc.Type} v{doc.Version}: {doc.Title}");
+    return Results.Ok(doc);
+});
+
+app.MapPost("/v1/knowledge/{id}/deprecate",
+    (string id, HttpRequest request, KnowledgeService svc, DecisionLog decisions) =>
+{
+    if (RequestUser.From(request) is not { } actor)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var outcome = svc.Deprecate(id, actor);
+    if (outcome.Doc is null) return Results.BadRequest(new { error = outcome.Error });
+
+    decisions.Record("knowledge_deprecate", actor, outcome.Doc.Id, outcome.Doc.Scope, 0,
+        $"{outcome.Doc.Type} v{outcome.Doc.Version}: {outcome.Doc.Title} (매핑 {outcome.TouchedMappings}건 정리)");
+    return Results.Ok(new { doc = outcome.Doc, touchedMappings = outcome.TouchedMappings });
+});
 
 // 검수 큐(HITL) — 저신뢰 매핑 열람. 개인 스코프는 제외된다.
 app.MapGet("/v1/review", (PersonalizationService svc, int? limit) =>

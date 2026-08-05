@@ -8,8 +8,13 @@ public sealed record Concept(
     string? EntityRef = null); // KG 연결 힌트 (예: "Company")
 
 /// <summary>
-/// Core Ontology (ARCHITECTURE §5.1 Layer A) — 고정 자산.
-/// Adaptive Semantic Mapping의 개념 사전이자 AI few-shot 시드의 기반.
+/// 구매 도메인 개념의 <b>초기 시드</b> (ARCHITECTURE §5.1 Layer A).
+///
+/// <para>
+/// 더 이상 런타임의 진실이 아니다 — 런타임 온톨로지는 <see cref="KnowledgeSeed"/>가 이 배열을
+/// 문서화한 것에서 컴파일되며(<see cref="CompiledKnowledge"/>), 게시·폐기로 배포 없이 자란다.
+/// 이 클래스는 시드 원료와 테스트 기준선으로만 남는다.
+/// </para>
 /// </summary>
 public static class ProcurementOntology
 {

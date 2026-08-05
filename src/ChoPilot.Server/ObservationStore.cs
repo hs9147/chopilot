@@ -24,14 +24,5 @@ public sealed class ObservationStore
         _store.Values.OrderBy(v => v.Seq).ToList();
 }
 
-/// <summary>화면 URL/타이틀에서 업무객체 힌트 추정 (PoC 규칙).</summary>
-public static class BusinessHint
-{
-    public static string FromScreen(ScreenInfo screen)
-    {
-        var text = $"{screen.Url} {screen.Title}".ToLowerInvariant();
-        if (text.Contains("/po") || text.Contains("발주") || text.Contains("order"))
-            return "PurchaseOrder";
-        return "PurchaseRequest";
-    }
-}
+// 화면→업무객체 힌트는 하드코딩(구 BusinessHint)에서 지식 문서로 이전됐다 —
+// CompiledKnowledge.ResolveBusinessHint(ARCHITECTURE §5.5, business_hint 문서).

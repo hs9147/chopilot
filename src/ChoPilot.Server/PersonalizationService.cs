@@ -35,8 +35,13 @@ public sealed record CorrectionOutcome(MappingEntry? Entry, List<string> Unknown
 public sealed class PersonalizationService
 {
     private readonly IMappingCache _cache;
+    private readonly IKnowledgeProvider _knowledge;
 
-    public PersonalizationService(IMappingCache cache) => _cache = cache;
+    public PersonalizationService(IMappingCache cache, IKnowledgeProvider knowledge)
+    {
+        _cache = cache;
+        _knowledge = knowledge;
+    }
 
     /// <summary>
     /// 검수 대기(저신뢰) 매핑 목록. <b>개인 스코프는 제외</b>한다 —
@@ -79,8 +84,11 @@ public sealed class PersonalizationService
     /// </summary>
     public CorrectionOutcome ApplyCorrection(string userId, CorrectionRequest req)
     {
+        // 온톨로지는 하드코딩이 아니라 현재 게시된 지식이다 — 개념 문서가 승인되면
+        // 재배포 없이 그 개념으로의 보정이 즉시 가능해진다(ARCHITECTURE §5.5).
+        var ontology = _knowledge.Current;
         var resolved = req.Mapping
-            .Select(m => (Field: m, Concept: ProcurementOntology.Resolve(m.Concept)))
+            .Select(m => (Field: m, Concept: ontology.Resolve(m.Concept)))
             .ToList();
 
         var unknown = resolved.Where(r => r.Concept is null)

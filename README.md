@@ -132,12 +132,31 @@ curl localhost:5080/v1/observations  # 스냅샷 목록 + 인벤토리 집계
 U="X-ChoPilot-User: alice"
 
 curl -H "$U" localhost:5080/v1/uep          # 내 화면 사용 빈도·최근성 + 화면 전이 그래프 (UEP)
-curl        localhost:5080/v1/ontology      # 보정 폼이 쓸 개념 목록(별칭 포함)
+curl        localhost:5080/v1/ontology      # 개념 목록(별칭 포함) — 게시된 지식의 컴파일 결과
 curl        localhost:5080/v1/review        # 검수 큐 (pending_review, 개인 스코프 제외)
 curl -H "$U" -X POST localhost:5080/v1/review/promote -d '{...}'  # 검수 통과 → trusted
 curl -H "$U" -X POST localhost:5080/v1/correction     -d '{...}'  # 개인 보정
-curl        localhost:5080/v1/decisions     # 승격·보정 결정 이력 (누가 언제)
+curl        localhost:5080/v1/decisions     # 승격·보정·지식 결정 이력 (누가 언제)
 ```
+
+### 지식 수명주기 API (Curated Knowledge Plane)
+
+온톨로지·가이드 규칙·업무객체 힌트는 코드가 아니라 **버전 관리되는 지식 문서**다
+(ARCHITECTURE §5.4 Plane 3, §5.5). 개념 문서가 승인되면 **재배포 없이** 보정·가이드·AI
+프롬프트에 반영되고, 지식 버전 변경은 저신뢰 매핑의 재추론 백오프를 즉시 만료시킨다.
+
+```bash
+curl        localhost:5080/v1/knowledge                    # 문서 목록 + 지식 버전
+curl -H "$U" -X POST localhost:5080/v1/knowledge -d '{...}'            # 초안 제출 → pending_review
+curl -H "$U" -X POST localhost:5080/v1/knowledge/{id}/approve          # 게시 (버전 증가)
+curl -H "$U" -X POST localhost:5080/v1/knowledge/{id}/deprecate        # 폐기 (해당 매핑 정리)
+```
+
+- **삭제는 없다** — 폐기만 있고, 폐기 문서는 이력으로 남는다.
+- 민감 개념의 **민감 → 비민감 하향은 승인 단계에서 거부**된다(마스킹 2차 방어선).
+- 개념 폐기 시 그 개념을 쓰는 매핑에서 필드를 제거하고, 남은 신뢰도가 θ 미만이면
+  `pending_review`로 강등한다.
+- 전형적 루프: 보정에서 미지 개념 거부 → 개념 문서 제출·승인 → 같은 보정 즉시 수락.
 
 - **개인 보정은 `personal:<user>` 스코프에만 적재**되고 캐스케이드에서 1순위로 적중한다 →
   같은 화면 재방문 시 AI를 호출하지 않는다. 다른 사용자에게는 영향이 없다.

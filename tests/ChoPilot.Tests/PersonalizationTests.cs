@@ -94,7 +94,7 @@ public class PersonalizationServiceTests
         cache.Put(Pending("sig-low", 0.4));
         cache.Put(Pending("sig-mid", 0.7));
         cache.Put(Pending("sig-hi", 0.75) with { Status = "trusted" });   // trusted 제외
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var queue = svc.ReviewQueue();
 
@@ -109,7 +109,7 @@ public class PersonalizationServiceTests
         var cache = new InMemoryMappingCache();
         cache.Put(Pending("sig-shared", 0.5));
         cache.Put(Pending("sig-mine", 0.3, scope: "personal:alice"));
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var queue = svc.ReviewQueue();
 
@@ -122,7 +122,7 @@ public class PersonalizationServiceTests
     {
         var cache = new InMemoryMappingCache();
         cache.Put(Pending("sig1", 0.5));
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var promoted = svc.Promote(new PromoteRequest("sig1", "global", Confidence: 0.9));
 
@@ -134,14 +134,14 @@ public class PersonalizationServiceTests
 
     [Fact]
     public void Promote_ReturnsNull_ForUnknown() =>
-        Assert.Null(new PersonalizationService(new InMemoryMappingCache())
+        Assert.Null(new PersonalizationService(new InMemoryMappingCache(), new KnowledgeStore())
             .Promote(new PromoteRequest("nope", "global")));
 
     [Fact]
     public void ApplyCorrection_Writes_PersonalScope_HighConfidence()
     {
         var cache = new InMemoryMappingCache();
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var outcome = svc.ApplyCorrection("user7", new CorrectionRequest(
             "sigX", "PurchaseRequest", new() { new CorrectionField("n2", "UnitPrice") }));
@@ -159,7 +159,7 @@ public class PersonalizationServiceTests
     public void ApplyCorrection_Accepts_AliasConcept_AndKeepsSensitiveFlag()
     {
         // 사용자는 화면에 보이는 "단가"로 정정한다. 별칭을 못 읽으면 민감 플래그가 꺼져버린다.
-        var svc = new PersonalizationService(new InMemoryMappingCache());
+        var svc = new PersonalizationService(new InMemoryMappingCache(), new KnowledgeStore());
 
         var outcome = svc.ApplyCorrection("u1", new CorrectionRequest(
             "sigX", "PurchaseRequest", new() { new CorrectionField("n2", "단가") }));
@@ -173,7 +173,7 @@ public class PersonalizationServiceTests
     public void ApplyCorrection_Rejects_UnknownConcept_Entirely()
     {
         var cache = new InMemoryMappingCache();
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var outcome = svc.ApplyCorrection("u1", new CorrectionRequest(
             "sigX", "PurchaseRequest", new()
@@ -191,7 +191,7 @@ public class PersonalizationServiceTests
     public void AliasCorrection_StillSuppresses_SensitiveValue_InBusinessObject()
     {
         // 결함의 실제 결과까지 고정한다: 별칭 정정이 BO의 민감값 억제를 무력화하면 안 된다.
-        var svc = new PersonalizationService(new InMemoryMappingCache());
+        var svc = new PersonalizationService(new InMemoryMappingCache(), new KnowledgeStore());
         var outcome = svc.ApplyCorrection("u1", new CorrectionRequest(
             "sigX", "PurchaseRequest", new() { new CorrectionField("n2", "단가") }));
 
@@ -225,7 +225,7 @@ public class CorrectionCascadeTests
         var cache = new InMemoryMappingCache();
         var mapper = new FakeMapper();
         var resolver = new MappingResolver(cache, mapper, thetaHigh: 0.8);
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var screen = new ScreenInfo("https://proc/pr/create", "구매요청", null);
         var tree = new UiNode("n1", "Form", null, null, null, new()
@@ -238,7 +238,7 @@ public class CorrectionCascadeTests
             sig, "PurchaseRequest", new() { new CorrectionField("n2", "Material") }));
 
         var result = await resolver.ResolveAsync(
-            sig, "user1", screen, tree, ProcurementOntology.Concepts, "PurchaseRequest");
+            sig, "user1", screen, tree, KnowledgeSeed.Compile(), "PurchaseRequest");
 
         Assert.True(result.CacheHit);
         Assert.Equal("personal:user1", result.Entry.Scope);
@@ -252,7 +252,7 @@ public class CorrectionCascadeTests
         var cache = new InMemoryMappingCache();
         var mapper = new FakeMapper();
         var resolver = new MappingResolver(cache, mapper, thetaHigh: 0.8);
-        var svc = new PersonalizationService(cache);
+        var svc = new PersonalizationService(cache, new KnowledgeStore());
 
         var screen = new ScreenInfo("https://proc/pr/create", "구매요청", null);
         var tree = new UiNode("n1", "Form", null, null, null, new()
@@ -265,7 +265,7 @@ public class CorrectionCascadeTests
             sig, "PurchaseRequest", new() { new CorrectionField("n2", "Material") }));
 
         var bob = await resolver.ResolveAsync(
-            sig, "bob", screen, tree, ProcurementOntology.Concepts, "PurchaseRequest");
+            sig, "bob", screen, tree, KnowledgeSeed.Compile(), "PurchaseRequest");
 
         Assert.NotEqual("personal:alice", bob.Entry.Scope);   // 개인 보정은 개인 평면에만(D5)
         Assert.Equal(1, mapper.Calls);                        // bob은 자기 경로로 추론

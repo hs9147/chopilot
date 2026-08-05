@@ -36,7 +36,7 @@ public class ReinferenceBackoffTests
     private static string Signature => SignatureService.Compute(Screen, Tree);
 
     private static Task<MappingResolver.ResolveResult> Resolve(MappingResolver resolver, string user = "u1") =>
-        resolver.ResolveAsync(Signature, user, Screen, Tree, ProcurementOntology.Concepts, "PurchaseRequest");
+        resolver.ResolveAsync(Signature, user, Screen, Tree, KnowledgeSeed.Compile(), "PurchaseRequest");
 
     [Fact]
     public async Task LowConfidence_IsInferredOnce_ThenReused()
@@ -117,7 +117,7 @@ public class ReinferenceBackoffTests
         await Resolve(resolver);
         Assert.Equal(1, mapper.Calls);
 
-        new PersonalizationService(cache).ApplyCorrection("u1", new CorrectionRequest(
+        new PersonalizationService(cache, new KnowledgeStore()).ApplyCorrection("u1", new CorrectionRequest(
             Signature, "PurchaseRequest", new() { new CorrectionField("n2", "Material") }));
 
         // 백오프는 호출을 미루기만 한다. 신뢰도를 실제로 올리는 건 사람의 보정이다.
@@ -142,7 +142,7 @@ public class ReinferenceBackoffTests
             thetaHigh: 0.8, reinferAfter: TimeSpan.FromHours(24), clock: () => now);
 
         await Resolve(resolver, "alice");
-        new PersonalizationService(cache).Promote(new PromoteRequest(Signature, "global", Confidence: 0.9));
+        new PersonalizationService(cache, new KnowledgeStore()).Promote(new PromoteRequest(Signature, "global", Confidence: 0.9));
 
         now = now.AddHours(48);
         var bob = await Resolve(resolver, "bob");     // 검수는 공용 평면을 고친다
