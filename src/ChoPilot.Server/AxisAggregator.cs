@@ -34,6 +34,12 @@ public sealed class AxisAggregator
     /// <summary>미등록 키를 본문에 이름으로 적는 최대 개수. 나머지는 개수로만 적는다.</summary>
     public const int MaxNamedGaps = 20;
 
+    /// <summary>완료 시점에 이 비율 이상 채워져 있던 개념은 <b>필수</b>로 제안한다.</summary>
+    public const double RequiredFillRate = 0.9;
+
+    /// <summary>이 비율 이하로만 채워진 개념은 필수에서 <b>뺀다</b>. 그 사이는 판단 보류다.</summary>
+    public const double OptionalFillRate = 0.5;
+
     private readonly UnknownConceptLog _unknownConcepts;
     private readonly UepStore _uep;
     private readonly SuggestionFeedbackStore _suggestions;
@@ -41,13 +47,14 @@ public sealed class AxisAggregator
     private readonly EntityStore _entities;
     private readonly FoundationStore _foundation;
     private readonly FoundationReconciler _reconciler;
+    private readonly CompletionStore _completions;
     private readonly int _minSupport;
     private readonly int _minDistinctUsers;
 
     public AxisAggregator(
         UnknownConceptLog unknownConcepts, UepStore uep,
         SuggestionFeedbackStore suggestions, KnowledgeStore knowledge, EntityStore entities,
-        FoundationStore foundation, FoundationReconciler reconciler,
+        FoundationStore foundation, FoundationReconciler reconciler, CompletionStore completions,
         int minSupport = DefaultMinSupport, int minDistinctUsers = DefaultMinDistinctUsers)
     {
         _unknownConcepts = unknownConcepts;
@@ -57,6 +64,7 @@ public sealed class AxisAggregator
         _entities = entities;
         _foundation = foundation;
         _reconciler = reconciler;
+        _completions = completions;
         _minSupport = minSupport;
         _minDistinctUsers = minDistinctUsers;
     }
@@ -74,10 +82,85 @@ public sealed class AxisAggregator
         AggregateSharedTransitions(drafts, skipped, at);
         AggregateRejectedSuggestions(drafts, skipped, at);
         AggregateItemCharacteristics(drafts, skipped, at);
+        AggregateRequiredFields(drafts, skipped, at);
         AggregateFoundationSources(drafts, skipped, at);
         AggregateFoundationGaps(drafts, skipped, at);
 
         return new AggregationResult(drafts, skipped);
+    }
+
+    /// <summary>
+    /// 완료 신호 → 필수 필드 규칙 <b>개정</b> (도메인 축).
+    ///
+    /// <para>
+    /// 다른 집계와 달리 <b>이미 존재해도 건너뛰지 않는다</b>. <c>rule.required.{BO}</c>는
+    /// 시드로 이미 게시돼 있고, 이 집계의 목적이 바로 그 추측을 관측으로 교체하는 것이기
+    /// 때문이다. 대신 두 가지로 잔소리를 막는다: 대기 중인 개정본이 있으면 쌓지 않고,
+    /// 관측이 현재 규칙과 같으면 초안을 만들지 않는다.
+    /// </para>
+    /// <para>
+    /// 판정은 <b>세 갈래</b>다. 높은 채움률은 필수로, 낮은 채움률은 비필수로 제안하고,
+    /// 그 사이(<see cref="OptionalFillRate"/>~<see cref="RequiredFillRate"/>)는 <b>건드리지 않는다</b> —
+    /// 애매한 증거로 규칙을 흔들면 가이드가 매 배치마다 말을 바꾸고, 그러면 사용자가
+    /// 가이드를 믿지 않게 된다. 관측되지 않은 개념도 그대로 둔다(증거 없음 ≠ 불필요).
+    /// </para>
+    /// </summary>
+    private void AggregateRequiredFields(List<KnowledgeDoc> drafts, List<string> skipped, DateTimeOffset at)
+    {
+        foreach (var stat in _completions.Stats())
+        {
+            var id = $"rule.required.{Slug(stat.BusinessObject)}";
+            if (_knowledge.PendingDraft(id) is not null) { skipped.Add($"{id}: 개정본이 이미 검수 대기 중"); continue; }
+            if (stat.Completions < _minSupport) { skipped.Add($"{id}: 완료 {stat.Completions}회 < {_minSupport}"); continue; }
+            if (stat.DistinctUsers < _minDistinctUsers) { skipped.Add($"{id}: {stat.DistinctUsers}명 < {_minDistinctUsers}명(k인 게이트)"); continue; }
+
+            var current = _knowledge.Current.RequiredFor(stat.BusinessObject) ?? Array.Empty<string>();
+            var proposed = new SortedSet<string>(current, StringComparer.Ordinal);
+            var evidence = new List<ConceptFillStat>();
+
+            foreach (var concept in stat.Concepts)
+            {
+                // 한 번 본 개념의 채움률로 규칙을 바꾸지 않는다.
+                if (concept.Observed < _minSupport) continue;
+
+                evidence.Add(concept);
+                if (concept.FillRate >= RequiredFillRate) proposed.Add(concept.Concept);
+                else if (concept.FillRate <= OptionalFillRate) proposed.Remove(concept.Concept);
+            }
+
+            var added = proposed.Except(current, StringComparer.Ordinal).ToList();
+            var removed = current.Except(proposed, StringComparer.Ordinal).ToList();
+            if (added.Count == 0 && removed.Count == 0)
+            {
+                skipped.Add($"{id}: 관측이 현재 규칙과 일치 (완료 {stat.Completions}회)");
+                continue;
+            }
+
+            var body = new StringBuilder()
+                .AppendLine($"**{stat.BusinessObject}** 완료 {stat.Completions}건({stat.DistinctUsers}명)을 관측한 결과, 필수 필드 규칙을 아래로 개정할 것을 제안한다.")
+                .AppendLine()
+                .AppendLine("| 개념 | 화면에 있던 횟수 | 채워진 횟수 | 채움률 |")
+                .AppendLine("|---|---|---|---|");
+
+            foreach (var e in evidence.OrderByDescending(e => e.FillRate))
+                body.AppendLine($"| {e.Concept} | {e.Observed} | {e.Filled} | {e.FillRate:P0} |");
+
+            body.AppendLine();
+            if (added.Count > 0) body.AppendLine($"- **추가**: {string.Join(", ", added)} — 저장 시점에 거의 항상 채워져 있었다.");
+            if (removed.Count > 0) body.AppendLine($"- **삭제**: {string.Join(", ", removed)} — 화면에 있었는데도 대체로 비어 있는 채로 저장됐다.");
+
+            body.AppendLine()
+                .AppendLine($"개정 후 필수 필드: {string.Join(", ", proposed)}")
+                .AppendLine()
+                .AppendLine($"채움률 {OptionalFillRate:P0}~{RequiredFillRate:P0} 구간의 개념은 증거가 애매해 손대지 않았다. 확인할 것: 조건부 필수(다른 필드 값에 따라 필요)인 개념이 섞여 있지 않은가?")
+                .AppendLine("승인하면 가이드의 \"…입력이 남았습니다\" 제안이 즉시 바뀐다.");
+
+            drafts.Add(Draft(id, KnowledgeType.RequiredFields,
+                $"필수 필드 개정: {stat.BusinessObject}", body.ToString(), at,
+                new KnowledgeProvenance(new List<string> { "observation.completion" },
+                    stat.Completions, stat.DistinctUsers, stat.LastSeen),
+                required: new RequiredFieldsRule(stat.BusinessObject, proposed.ToArray())));
+        }
     }
 
     /// <summary>
@@ -340,7 +423,7 @@ public sealed class AxisAggregator
     private static KnowledgeDoc Draft(
         string id, string type, string title, string body, DateTimeOffset at,
         KnowledgeProvenance provenance, Concept? concept = null,
-        string axis = KnowledgeAxis.Domain) => new(
+        string axis = KnowledgeAxis.Domain, RequiredFieldsRule? required = null) => new(
         Id: id,
         Axis: axis,
         Kind: KnowledgeKind.Curated,
@@ -348,7 +431,7 @@ public sealed class AxisAggregator
         Scope: "global",
         Title: title,
         Concept: concept,
-        Required: null,
+        Required: required,
         Hint: null,
         Body: body,
         Version: 0,

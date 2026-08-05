@@ -50,6 +50,15 @@ public sealed class KnowledgeStore : IKnowledgeProvider
     }
 
     /// <summary>
+    /// 이 id의 승인 대기 개정본. 개정을 제안하는 집계기가 <b>초안을 쌓지 않기</b> 위해 쓴다 —
+    /// <see cref="Get"/>는 대기본과 게시본을 구분해 주지 않으므로 "이미 존재"로는 판단할 수 없다.
+    /// </summary>
+    public KnowledgeDoc? PendingDraft(string id)
+    {
+        lock (_gate) return _pending.GetValueOrDefault(id);
+    }
+
+    /// <summary>
     /// 초안 제출 → pending_review. 같은 Id의 게시본이 있으면 <b>개정</b>이 된다
     /// (승인 시 게시본을 대체, 버전 +1). 이미 대기 중인 초안은 덮어쓴다(초안 편집).
     /// </summary>

@@ -50,6 +50,12 @@ public static class ObservationContract
         if (evt.Privacy.MaskedRefs is null) return "privacy.maskedRefs가 없다 (빈 배열로 보내라)";
         if (evt.Tree is null) return "tree가 없다";
 
+        // 오타 난 트리거를 통과시키면 완료 신호가 조용히 사라진다 —
+        // "save_click"은 완료로 세어지지 않고, 아무도 그 사실을 알지 못한다.
+        if (!ObservationTrigger.IsValid(evt.Trigger))
+            return $"trigger '{evt.Trigger}'는 {ObservationTrigger.FocusChanged}|" +
+                   $"{ObservationTrigger.StructureChanged}|{ObservationTrigger.SaveClicked} 중 하나여야 한다";
+
         return ValidateTree(evt.Tree);
     }
 

@@ -11,7 +11,7 @@ using Microsoft.Extensions.Configuration;
 //
 //   사용법:
 //     chopilot-dump [--out <파일>] [--delay <초>] [--baseline] [--bedrock]
-//                   [--upload [url]] [--spool-dir <경로>]
+//                   [--upload [url]] [--spool-dir <경로>] [--completed]
 //
 //   동작:
 //     1. --delay 초 대기 (그 사이 관측할 브라우저 화면을 포그라운드로)
@@ -22,6 +22,10 @@ using Microsoft.Extensions.Configuration;
 //        --upload [url] : 서버로 POST 후 Guide 조회 (기본 Server:IngestionEndpoint)
 //                         전송 실패 시 durable 스풀에 적재, 다음 실행에서 재전송
 //        --spool-dir    : 스풀 디렉터리 지정 (기본 <실행경로>/spool)
+//        --completed    : 이 캡처를 작업 완료 신호로 표시 (저장 버튼을 누른 직후 캡처)
+//                         완료 시점의 화면만이 "이 업무객체가 실제로 무엇을 요구했는가"의
+//                         증거가 된다 — 작성 중간의 빈칸은 증거가 아니다 (ARCHITECTURE §11)
+//        --trigger <v>  : 트리거를 직접 지정 (focus_changed|structure_changed|save_clicked)
 //     5. ObservationEvent JSON을 stdout + (옵션)파일로 출력
 //
 //   설정: appsettings.json → appsettings.local.json → 환경변수(CHOPILOT_*) 순 오버라이드
@@ -29,6 +33,14 @@ using Microsoft.Extensions.Configuration;
 
 var cfg = LoadConfig();
 var opts = ParseArgs(args);
+
+// 오타 난 트리거는 서버가 400으로 거부한다 — 캡처를 마친 뒤에 알게 되면 그 관측은 버려진다.
+if (!ObservationTrigger.IsValid(opts.Trigger))
+{
+    Console.Error.WriteLine($"[chopilot-dump] 알 수 없는 --trigger '{opts.Trigger}' — " +
+        $"{ObservationTrigger.FocusChanged}|{ObservationTrigger.StructureChanged}|{ObservationTrigger.SaveClicked}");
+    return 1;
+}
 
 if (opts.Delay > 0)
 {
@@ -59,11 +71,14 @@ var evt = new ObservationEvent(
     CapturedAt: DateTimeOffset.Now,
     Screen: screen,
     Tree: maskedTree,
-    Privacy: new PrivacyInfo(gate.PolicyVersion, maskedRefs));
+    Privacy: new PrivacyInfo(gate.PolicyVersion, maskedRefs),
+    Trigger: opts.Trigger);
 
 var jsonOpts = new JsonSerializerOptions { WriteIndented = true };
 
 Console.Error.WriteLine($"[chopilot-dump] signature = {signature}");
+if (ObservationTrigger.IsCompletion(opts.Trigger))
+    Console.Error.WriteLine("[chopilot-dump] 완료 신호 — 이 화면 상태가 필수 필드 규칙의 증거가 됩니다");
 Console.Error.WriteLine($"[chopilot-dump] masked refs = {maskedRefs.Count}");
 
 if (opts.Upload)
@@ -164,6 +179,8 @@ static Options ParseArgs(string[] args)
                 if (i + 1 < args.Length && !args[i + 1].StartsWith("--")) o.UploadUrl = args[++i];
                 break;
             case "--spool-dir" when i + 1 < args.Length: o.SpoolDir = args[++i]; break;
+            case "--trigger" when i + 1 < args.Length: o.Trigger = args[++i]; break;
+            case "--completed": o.Trigger = ObservationTrigger.SaveClicked; break;
         }
     }
     return o;
@@ -178,4 +195,7 @@ sealed class Options
     public bool Upload { get; set; }
     public string? UploadUrl { get; set; }
     public string? SpoolDir { get; set; }
+
+    /// <summary>이 캡처를 일으킨 상호작용. 기본은 화면 전환 관측이다.</summary>
+    public string Trigger { get; set; } = ObservationTrigger.FocusChanged;
 }

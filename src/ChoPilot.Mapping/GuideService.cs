@@ -31,18 +31,11 @@ public static class GuideService
 {
     public static GuideResult Build(MappingEntry entry, UiNode tree, BusinessObject bo, CompiledKnowledge knowledge)
     {
-        var byRef = new Dictionary<string, UiNode>();
-        Index(tree, byRef);
-
         // 규칙 미정의 업무객체는 매핑된 개념 전체를 필수로 간주(폴백).
-        var required = knowledge.RequiredFor(entry.BusinessObject)
-            ?? entry.Mapping.Select(m => m.Concept).Distinct().ToArray();
+        var required = knowledge.RequiredFor(entry.BusinessObject) ?? FieldFill.Observed(entry);
 
-        // 값이 채워진 개념 (마스킹된 민감필드는 값이 있으므로 '채움'으로 계수, block만 제외)
-        var filledConcepts = entry.Mapping
-            .Where(m => byRef.TryGetValue(m.ElementRef, out var n) && !string.IsNullOrEmpty(n.Value))
-            .Select(m => m.Concept)
-            .ToHashSet();
+        // 채움 판정은 완료 신호 집계와 같은 정의를 쓴다(FieldFill) — 갈리면 규칙 개정이 모순 위에 선다.
+        var filledConcepts = FieldFill.Filled(entry, tree);
 
         var filled = required.Count(filledConcepts.Contains);
         var req = required.Length;
@@ -115,10 +108,4 @@ public static class GuideService
 
     private static string Label(CompiledKnowledge knowledge, string concept) =>
         knowledge.ByName(concept)?.Aliases.FirstOrDefault() ?? concept;
-
-    private static void Index(UiNode node, Dictionary<string, UiNode> map)
-    {
-        map[node.Ref] = node;
-        foreach (var child in node.Children) Index(child, map);
-    }
 }

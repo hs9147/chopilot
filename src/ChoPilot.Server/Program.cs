@@ -31,6 +31,7 @@ builder.Services.AddSingleton<KnowledgeStore>();
 builder.Services.AddSingleton<UnknownConceptLog>();
 builder.Services.AddSingleton<EntityStore>();
 builder.Services.AddSingleton<KnowledgeViewRenderer>();
+builder.Services.AddSingleton<CompletionStore>();
 
 // ── 기반 정보 축 출처 (무료 API · MCP) ──────────────────────────────────────
 // 등록 순서가 병합 우선순위다: 뒤에 등록된 출처가 앞을 덮는다.
@@ -82,6 +83,7 @@ builder.Services.AddSingleton(sp => new AxisAggregator(
     sp.GetRequiredService<EntityStore>(),
     sp.GetRequiredService<FoundationStore>(),
     sp.GetRequiredService<FoundationReconciler>(),
+    sp.GetRequiredService<CompletionStore>(),
     cfg.GetValue<int?>("Knowledge:MinSupport") ?? AxisAggregator.DefaultMinSupport,
     cfg.GetValue<int?>("Knowledge:MinDistinctUsers") ?? AxisAggregator.DefaultMinDistinctUsers));
 builder.Services.AddSingleton<IKnowledgeProvider>(sp => sp.GetRequiredService<KnowledgeStore>());
@@ -142,7 +144,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapPost("/v1/observations",
     async (ObservationEvent? evt, MappingResolver resolver, ObservationStore store,
            AuditService audit, UepStore uep, IKnowledgeProvider knowledgeProvider,
-           EntityStore entities) =>
+           EntityStore entities, CompletionStore completions) =>
 {
     // 계약 위반은 장애가 아니라 거부다. 500을 내면 클라이언트 스풀이 그것을 서버 장애로 읽고
     // 순서 보존을 위해 큐 머리에 남긴다 — 그 뒤의 모든 관측이 영원히 도달하지 못한다.
@@ -173,6 +175,16 @@ app.MapPost("/v1/observations",
 
     // 엔티티 결정 1단(§6 Deterministic). BO의 비민감 값만 보므로 단가·금액은 애초에 도달하지 않는다.
     entities.Record(EntityResolver.Extract(bo, knowledge), evt.UserId, signature, DateTimeOffset.UtcNow);
+
+    // 작업 완료 신호(§11). 저장을 누른 순간의 화면만이 "이 업무객체가 실제로 무엇을 요구했는가"를
+    // 말해 준다 — 작성 중간의 빈칸은 아직 안 채운 것인지 필요 없는 것인지 구분되지 않는다.
+    // 개념 이름과 개수만 남고 값은 남지 않는다.
+    if (ObservationTrigger.IsCompletion(evt.Trigger))
+        completions.Record(new CompletionRecord(
+            res.Entry.BusinessObject, evt.UserId, signature,
+            FieldFill.Observed(res.Entry),
+            FieldFill.Filled(res.Entry, evt.Tree).ToList(),
+            DateTimeOffset.UtcNow));
 
     return Results.Ok(new
     {
@@ -406,6 +418,16 @@ app.MapPost("/v1/knowledge/aggregate",
         skipped = result.Skipped.Concat(rejected).ToList(),
     });
 });
+
+// 작업 완료 신호 집계 (ARCHITECTURE §11). 필수 필드 규칙 개정의 근거다.
+// fillRate는 "화면에 있었을 때 채워져 있던 비율" — 화면에 없던 개념은 분모에도 들어가지 않는다.
+app.MapGet("/v1/completions", (CompletionStore completions, int? limit) =>
+    Results.Ok(new
+    {
+        count = completions.Count,
+        businessObjects = completions.Stats(),
+        recent = completions.Snapshot(limit ?? 50),
+    }));
 
 // 집계 원자료 — 어떤 결핍이 관측됐는지(승인 판단의 근거).
 app.MapGet("/v1/knowledge/signals", (UnknownConceptLog unknown, int? limit) =>

@@ -34,6 +34,7 @@ const state = {
   knowledgeVersion: 0,
   signals: null,          // 미지 개념 후보
   entities: null,         // 엔티티 결정 결과(H5)
+  completions: null,      // 작업 완료 신호 집계(필수 필드 규칙의 증거)
   foundation: null,       // 기반 출처 상태 + 마스터 요약
   reconcile: null,        // 관측 ↔ 마스터 대사 결과
   myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
@@ -149,11 +150,11 @@ const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor 
 async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
-           knowledge, signals, entities, foundation, reconcile] = await Promise.all([
+           knowledge, signals, entities, foundation, reconcile, completions] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
-      api('/v1/foundation'), api('/v1/foundation/reconcile'),
+      api('/v1/foundation'), api('/v1/foundation/reconcile'), api('/v1/completions?limit=1'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -169,6 +170,7 @@ async function refreshAll() {
     state.entities = entities;
     state.foundation = foundation;
     state.reconcile = reconcile;
+    state.completions = completions;
     state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
@@ -402,6 +404,7 @@ const isDraft = (d) => d.status === 'pending_review';
 function renderKnowledge() {
   renderDrafts();
   renderKnowledgeSignals();
+  renderCompletions();
   renderPublished();
   renderMyProfile();
   renderDraftBody();
@@ -553,6 +556,51 @@ async function aggregate(dryRun) {
     msg.className = 'warn';
     msg.textContent = `집계 실패: ${err.message}`;
   }
+}
+
+/* ── 완료 신호 (필수 필드 규칙의 증거) ────────────────── */
+
+// 집계기의 판정 구간과 같은 값이어야 한다 — 화면과 초안이 다른 색을 말하면 승인자가 혼란스럽다.
+const REQUIRED_FILL_RATE = 0.9;
+const OPTIONAL_FILL_RATE = 0.5;
+
+function renderCompletions() {
+  const box = $('completions');
+  const c = state.completions;
+
+  if (!c || c.count === 0) {
+    box.innerHTML = '<p class="empty">완료 신호 없음 — <code>chopilot-dump --completed</code> 로 '
+      + '저장 직후 화면을 캡처하면 여기 쌓인다. 그때까지 필수 필드 규칙은 <strong>시드 추측</strong>이다.</p>';
+    return;
+  }
+
+  const sections = c.businessObjects.map((bo) => {
+    const rows = bo.concepts.map((k) => {
+      const verdict = k.fillRate >= REQUIRED_FILL_RATE ? ['pill-pass', '필수로 제안']
+        : k.fillRate <= OPTIONAL_FILL_RATE ? ['pill-warn', '비필수로 제안']
+        : ['pill-muted', '판단 보류'];
+      return `<tr>
+        <td class="mono">${esc(k.concept)}</td>
+        <td class="num">${k.observed}</td>
+        <td class="num">${k.filled}</td>
+        <td class="num">${pct(k.fillRate)}</td>
+        <td class="num">${k.distinctUsers}</td>
+        <td><span class="pill ${verdict[0]}">${verdict[1]}</span></td>
+      </tr>`;
+    }).join('');
+
+    return `<h4>${esc(bo.businessObject)}
+        <span class="hint">— 완료 ${bo.completions}건 · ${bo.distinctUsers}명</span></h4>
+      <table>
+        <thead><tr><th>개념</th><th class="num">화면에 있던</th><th class="num">채워진</th>
+                   <th class="num">채움률</th><th class="num">사람</th><th>판정</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }).join('');
+
+  box.innerHTML = sections
+    + `<p class="hint">채움률 ${pct(OPTIONAL_FILL_RATE)}~${pct(REQUIRED_FILL_RATE)} 구간은 손대지 않는다 — `
+    + '애매한 증거로 규칙을 흔들면 가이드가 배치마다 말을 바꾼다.</p>';
 }
 
 /* ── 기반 정보 (무료 API · MCP) ───────────────────────── */
@@ -994,6 +1042,20 @@ function buildMarkdown() {
          '', '> 자동 병합하지 않는다 — 잘못 합치면 서로 다른 실체가 하나가 되고 오류가 전파된다.']
       : []),
     '',
+    '## 작업 완료 신호 (ARCHITECTURE §11)',
+    '',
+    state.completions && state.completions.count
+      ? `- 완료 관측 ${state.completions.count}건 — 필수 필드 규칙이 시드 추측에서 관측으로 교체될 수 있다`
+      : '- **완료 신호 0건.** `rule.required.*`는 아직 검증되지 않은 시드 추측이고, 가이드의 빈칸 제안은 전부 그 위에 서 있다.',
+    ...(state.completions && state.completions.count
+      ? state.completions.businessObjects.flatMap((bo) => [
+          '',
+          `### ${bo.businessObject} — 완료 ${bo.completions}건 / ${bo.distinctUsers}명`,
+          '',
+          '| 개념 | 화면에 있던 | 채워진 | 채움률 |', '|------|------|------|------|',
+          ...bo.concepts.map((k) => `| ${k.concept} | ${k.observed} | ${k.filled} | ${pct(k.fillRate)} |`)])
+      : []),
+    '',
     '## 기반 정보 (무료 API · MCP)',
     '',
     state.foundation
@@ -1088,6 +1150,7 @@ function bind() {
       entities: state.entities,
       foundation: state.foundation,
       reconcile: state.reconcile,
+      completions: state.completions,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

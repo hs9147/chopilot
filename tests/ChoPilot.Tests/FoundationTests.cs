@@ -78,17 +78,18 @@ internal static class TestFoundation
 
     public static FoundationStore Store(params IFoundationSource[] sources) => new(sources);
 
-    /// <summary>기반 출처 없이 만든 집계기 — 기반 축은 조용하고 나머지 축만 돈다.</summary>
+    /// <summary>기반 출처·완료 신호 없이 만든 집계기 — 해당 축은 조용하고 나머지만 돈다.</summary>
     public static AxisAggregator Aggregator(
         UnknownConceptLog unknown, UepStore uep, SuggestionFeedbackStore suggestions,
         KnowledgeStore knowledge, EntityStore entities,
-        FoundationStore? foundation = null,
+        FoundationStore? foundation = null, CompletionStore? completions = null,
         int minSupport = AxisAggregator.DefaultMinSupport,
         int minUsers = AxisAggregator.DefaultMinDistinctUsers)
     {
         foundation ??= new FoundationStore(Array.Empty<IFoundationSource>());
         return new AxisAggregator(unknown, uep, suggestions, knowledge, entities,
-            foundation, new FoundationReconciler(entities, foundation), minSupport, minUsers);
+            foundation, new FoundationReconciler(entities, foundation),
+            completions ?? new CompletionStore(), minSupport, minUsers);
     }
 }
 

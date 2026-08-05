@@ -18,6 +18,29 @@ public sealed record ScreenInfo(string? Url, string? Title, RecordHint? RecordHi
 
 public sealed record PrivacyInfo(string PolicyVersion, List<string> MaskedRefs);
 
+/// <summary>
+/// 관측을 일으킨 상호작용 (ARCHITECTURE §11 작업 완료 신호).
+///
+/// <para>
+/// <see cref="SaveClicked"/> 하나만 성격이 다르다. 나머지 둘은 "화면이 바뀌었다"는 사실이고,
+/// 이것은 <b>"사용자가 이 작업을 끝냈다"</b>는 판단이다. 저장 시점의 화면 상태라야
+/// "이 업무객체에 실제로 무엇이 필요한가"의 증거가 된다 — 작성 중간의 빈칸은
+/// 아직 안 채운 것인지 필요 없는 것인지 구분되지 않는다.
+/// </para>
+/// </summary>
+public static class ObservationTrigger
+{
+    public const string FocusChanged = "focus_changed";
+    public const string StructureChanged = "structure_changed";
+    public const string SaveClicked = "save_clicked";
+
+    /// <summary>null은 유효하다 — 완료 신호를 붙이지 않는 클라이언트가 여전히 관측을 올릴 수 있다.</summary>
+    public static bool IsValid(string? trigger) =>
+        trigger is null or FocusChanged or StructureChanged or SaveClicked;
+
+    public static bool IsCompletion(string? trigger) => trigger == SaveClicked;
+}
+
 /// <summary>Client → Server 이벤트 계약 (PHASE1-DESIGN §4.1).</summary>
 public sealed record ObservationEvent(
     string EventId,
@@ -29,9 +52,8 @@ public sealed record ObservationEvent(
     PrivacyInfo Privacy,
 
     /// <summary>
-    /// 관측을 일으킨 상호작용 — "focus_changed" | "structure_changed" | "save_clicked".
-    /// <b>예약 필드</b>(ARCHITECTURE §11 작업 완료 신호): 지금 계약에 자리를 잡지 않으면
-    /// 앞으로 캡처되는 스냅샷 전부가 완료 신호 없는 데이터로 남는다. 클라이언트 구현 전까지 null.
+    /// 관측을 일으킨 상호작용 (<see cref="ObservationTrigger"/>).
+    /// null이면 완료 신호가 없는 관측이다 — 지표에는 들어가지만 필수 필드 검증에는 쓰이지 않는다.
     /// </summary>
     string? Trigger = null);
 
