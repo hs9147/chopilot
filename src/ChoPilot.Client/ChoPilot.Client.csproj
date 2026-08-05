@@ -29,6 +29,10 @@
     <None Update="appsettings.local.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- 원클릭 실행 런처. exe 옆에 있어야 %~dp0 로 exe를 찾는다. -->
+    <None Update="chopilot-watch.cmd">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>
