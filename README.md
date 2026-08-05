@@ -16,7 +16,8 @@
 | [PHASE0-KIT.md](PHASE0-KIT.md) | Phase 0 실행 키트 (템플릿·스키마·측정표) |
 | [PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md) | **Phase 0 실측 가이드** (가설별 절차·명령·함정) |
 | [PHASE1-DESIGN.md](PHASE1-DESIGN.md) | Phase 1 상세 설계 (Web Agent + Guide, 읽기 전용) |
-| [SETUP.md](SETUP.md) | 개발환경 설정 (요구사항·빌드·설정·AWS 자격증명·실행·트러블슈팅) |
+| [RUNBOOK.md](RUNBOOK.md) | **실행 가이드** (실행 모드·설정·5분 점검·트러블슈팅) |
+| [SETUP.md](SETUP.md) | 개발환경 설정 (요구사항·빌드·설정·AWS 자격증명·트러블슈팅) |
 
 ## 확정 설계 전제
 
