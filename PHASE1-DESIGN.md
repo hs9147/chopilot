@@ -161,7 +161,9 @@ resolve(signature, user_id):
 ```
 GET  /v1/knowledge                 # 문서 목록(axis·status 필터) + 현재 지식 버전. personal 스코프는 헤더 사용자만
 GET  /v1/knowledge/{id}            # 문서 1건
+GET  /v1/knowledge/signals         # 집계 원자료 — 거부된 보정 개념 시도(승인 판단의 근거)
 POST /v1/knowledge                 # 초안 제출 → pending_review (헤더 사용자 = 작성자)
+POST /v1/knowledge/aggregate       # 축별 신호 집계 → 초안 생성 (?dryRun=true 로 미리보기)
 POST /v1/knowledge/{id}/approve    # 게시 (헤더 사용자 = 승인자, DecisionLog 기록, 버전 증가)
 POST /v1/knowledge/{id}/deprecate  # 폐기 (개념이면 해당 매핑 필드 제거·강등, 버전 증가)
 ```
@@ -171,6 +173,29 @@ POST /v1/knowledge/{id}/deprecate  # 폐기 (개념이면 해당 매핑 필드 �
 - 개념 **추가**는 기존 매핑에 영향이 없다. 개념 **폐기**는 그 개념을 쓰는 매핑에서 해당 필드를
   제거하고, 남은 필드의 신뢰도가 θ 미만이면 `pending_review`로 강등한다.
 - `/v1/ontology`는 이제 하드코딩이 아니라 **게시된 지식의 컴파일 결과**를 서빙한다.
+
+### 4.6 축별 집계 — 신호가 초안이 되는 지점
+
+`POST /v1/knowledge/aggregate`는 4축 신호를 결정적으로 집계해 초안을 만든다. **LLM이 없다** —
+무엇이 몇 번, 몇 사람에게서 관측됐는지는 세면 되고, AI는 본문 서술 품질에만 쓰인다(Phase 2).
+
+| 축 | 신호 | 산출 초안 |
+|---|---|---|
+| domain | 보정에서 거부된 미지 개념 | `concept.{용어}` — **민감으로 제안**(모르면 닫는다), 승인자가 내린다 |
+| domain | 여러 사용자의 공통 화면 전이 | `note.flow.{from}--{to}` — **route만** 싣는다 |
+| domain | 여러 사용자가 반복 거부한 제안 | `note.rejected.{bo}.{concept}` — 규칙 재검토 |
+| user | UEP + 제안 판단 | `view.user.{id}` — **저장하지 않고 요청 시 렌더**(파생물) |
+
+두 게이트가 항상 걸린다: **지지도**(`Knowledge:MinSupport`, 기본 3)와 **k인**(`Knowledge:MinDistinctUsers`,
+기본 2). 걸러진 항목은 이유와 함께 `skipped`로 보고된다 — 침묵하는 절단은 "다 훑었다"로 읽힌다.
+
+**폐기된 문서는 다시 제안하지 않는다.** 사람이 "아니다"라고 판단한 것을 집계기가 매번 되살리면
+검수 큐가 무한 잔소리가 된다.
+
+**사용자 축 뷰는 저장하지 않는다.** UEP·판단 스토어에서 재생성되는 파생물이라 저장하면 즉시 낡고
+"누가 이 페이지의 진실을 소유하는가"가 무너진다. 편집·승인 대상이 아니며(`kind=view`) 컴파일에도
+참여하지 않는다. 개인 뷰에는 화면 **제목**이 실리지만(본인만 조회, D5), org 초안에는 **route**만
+실린다 — 제목에는 레코드 식별자가 섞일 수 있기 때문이다.
 
 ---
 

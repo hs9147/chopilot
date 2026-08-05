@@ -147,7 +147,9 @@ curl        localhost:5080/v1/decisions     # 승격·보정·지식 결정 이�
 
 ```bash
 curl        localhost:5080/v1/knowledge                    # 문서 목록 + 지식 버전
+curl        localhost:5080/v1/knowledge/signals            # 집계 원자료(거부된 개념 시도)
 curl -H "$U" -X POST localhost:5080/v1/knowledge -d '{...}'            # 초안 제출 → pending_review
+curl -H "$U" -X POST "localhost:5080/v1/knowledge/aggregate?dryRun=true"  # 신호 → 초안 (미리보기)
 curl -H "$U" -X POST localhost:5080/v1/knowledge/{id}/approve          # 게시 (버전 증가)
 curl -H "$U" -X POST localhost:5080/v1/knowledge/{id}/deprecate        # 폐기 (해당 매핑 정리)
 ```
@@ -156,7 +158,23 @@ curl -H "$U" -X POST localhost:5080/v1/knowledge/{id}/deprecate        # 폐기 
 - 민감 개념의 **민감 → 비민감 하향은 승인 단계에서 거부**된다(마스킹 2차 방어선).
 - 개념 폐기 시 그 개념을 쓰는 매핑에서 필드를 제거하고, 남은 신뢰도가 θ 미만이면
   `pending_review`로 강등한다.
-- 전형적 루프: 보정에서 미지 개념 거부 → 개념 문서 제출·승인 → 같은 보정 즉시 수락.
+
+**신호 → 초안 → 승인 루프.** 사용자가 온톨로지에 없는 개념으로 정정을 시도하면 거부되지만
+그 시도는 신호로 남는다. 집계기가 지지도·k인 게이트를 통과한 후보를 초안으로 만들고, 사람이
+승인해야 온톨로지가 된다 — **자동 게시는 없다.**
+
+```
+3명이 "결제조건" 정정 시도 → 400 거부 (+ 신호 기록)
+→ POST /v1/knowledge/aggregate → 초안 1건 (민감으로 제안)
+→ approve(kim) → 온톨로지 v1(8개) → v2(9개)
+→ 같은 보정 재시도 → 200 수락
+```
+
+집계는 **LLM 없이** 돈다(무엇이 몇 번, 몇 사람에게서 관측됐는지는 세면 된다). AI는 초안 본문의
+서술 품질에만 쓰이며, 비용이 관측 수가 아니라 후보 수에 비례하는 이유가 여기 있다.
+
+`GET /v1/knowledge?axis=user`는 **저장되지 않은** 개인 업무 프로파일을 요청 시 렌더한다 —
+자주 쓰는 화면, 업무 흐름, 반복 거부한 제안. 본인만 조회할 수 있다(D5).
 
 - **개인 보정은 `personal:<user>` 스코프에만 적재**되고 캐스케이드에서 1순위로 적중한다 →
   같은 화면 재방문 시 AI를 호출하지 않는다. 다른 사용자에게는 영향이 없다.

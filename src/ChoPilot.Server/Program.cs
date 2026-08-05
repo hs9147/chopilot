@@ -28,6 +28,15 @@ builder.Services.AddSingleton<PersonalizationService>();
 
 // Curated Knowledge Plane (ARCHITECTURE §5.4 Plane 3) — 온톨로지·규칙의 런타임 진실.
 builder.Services.AddSingleton<KnowledgeStore>();
+builder.Services.AddSingleton<UnknownConceptLog>();
+builder.Services.AddSingleton<KnowledgeViewRenderer>();
+builder.Services.AddSingleton(sp => new AxisAggregator(
+    sp.GetRequiredService<UnknownConceptLog>(),
+    sp.GetRequiredService<UepStore>(),
+    sp.GetRequiredService<SuggestionFeedbackStore>(),
+    sp.GetRequiredService<KnowledgeStore>(),
+    cfg.GetValue<int?>("Knowledge:MinSupport") ?? AxisAggregator.DefaultMinSupport,
+    cfg.GetValue<int?>("Knowledge:MinDistinctUsers") ?? AxisAggregator.DefaultMinDistinctUsers));
 builder.Services.AddSingleton<IKnowledgeProvider>(sp => sp.GetRequiredService<KnowledgeStore>());
 builder.Services.AddSingleton(sp => new KnowledgeService(
     sp.GetRequiredService<KnowledgeStore>(),
@@ -189,7 +198,8 @@ app.MapGet("/v1/ontology", (IKnowledgeProvider knowledge) =>
 // 제출 → 승인(게시) → 폐기. 삭제는 없다. 게시·폐기는 온톨로지·규칙을 영구히 바꾸는
 // 판단이므로 헤더 사용자를 요구하고 결정 이력에 남긴다.
 
-app.MapGet("/v1/knowledge", (HttpRequest request, KnowledgeStore store, string? axis, string? status) =>
+app.MapGet("/v1/knowledge",
+    (HttpRequest request, KnowledgeStore store, KnowledgeViewRenderer views, string? axis, string? status) =>
 {
     var user = RequestUser.From(request);
     var items = store.List(axis, status)
@@ -197,11 +207,26 @@ app.MapGet("/v1/knowledge", (HttpRequest request, KnowledgeStore store, string? 
         .Where(d => !d.Scope.StartsWith("personal:", StringComparison.Ordinal) ||
                     d.Scope == $"personal:{user}")
         .ToList();
+
+    // 사용자 축 뷰는 저장돼 있지 않다 — 요청 시 스토어에서 렌더한다(파생물이므로).
+    if (user is not null && axis is null or KnowledgeAxis.User &&
+        status is null or KnowledgeStatus.Published &&
+        views.Render(user, DateTimeOffset.UtcNow) is { } view)
+    {
+        items.Insert(0, view);
+    }
+
     return Results.Ok(new { version = store.Current.Version, count = items.Count, items });
 });
 
-app.MapGet("/v1/knowledge/{id}", (string id, HttpRequest request, KnowledgeStore store) =>
+app.MapGet("/v1/knowledge/{id}",
+    (string id, HttpRequest request, KnowledgeStore store, KnowledgeViewRenderer views) =>
 {
+    var user = RequestUser.From(request);
+    if (user is not null && id == $"view.user.{user}" &&
+        views.Render(user, DateTimeOffset.UtcNow) is { } view)
+        return Results.Ok(view);
+
     var doc = store.Get(id);
     if (doc is null) return Results.NotFound(new { error = "unknown knowledge id" });
     if (doc.Scope.StartsWith("personal:", StringComparison.Ordinal) &&
@@ -218,6 +243,44 @@ app.MapPost("/v1/knowledge", (HttpRequest request, KnowledgeDoc doc, KnowledgeSe
     var (draft, error) = svc.Submit(doc, author);
     return draft is null ? Results.BadRequest(new { error }) : Results.Ok(draft);
 });
+
+// 축별 집계 → 초안 생성 (ARCHITECTURE §5.5 1~2단계). 운영은 일 배치, 여기선 수동 트리거.
+// LLM은 여기 없다 — 결정적 집계만으로 초안이 만들어지고, AI는 본문 품질 개선(3단계)에만 쓰인다.
+app.MapPost("/v1/knowledge/aggregate",
+    (HttpRequest request, AxisAggregator aggregator, KnowledgeService svc, bool? dryRun) =>
+{
+    if (RequestUser.From(request) is not { } actor)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var result = aggregator.Aggregate(DateTimeOffset.UtcNow);
+    if (dryRun == true)
+        return Results.Ok(new { dryRun = true, drafts = result.Drafts, skipped = result.Skipped });
+
+    // 초안은 검수 큐로 들어갈 뿐 게시되지 않는다 — LLM/집계기 자동 게시는 없다.
+    var submitted = new List<KnowledgeDoc>();
+    var rejected = new List<string>();
+    foreach (var draft in result.Drafts)
+    {
+        var (doc, error) = svc.Submit(draft, "aggregator");
+        if (doc is not null) submitted.Add(doc); else rejected.Add($"{draft.Id}: {error}");
+    }
+
+    return Results.Ok(new
+    {
+        submitted = submitted.Count,
+        drafts = submitted,
+        skipped = result.Skipped.Concat(rejected).ToList(),
+    });
+});
+
+// 집계 원자료 — 어떤 결핍이 관측됐는지(승인 판단의 근거).
+app.MapGet("/v1/knowledge/signals", (UnknownConceptLog unknown, int? limit) =>
+    Results.Ok(new
+    {
+        unknownConceptAttempts = unknown.Count,
+        candidates = unknown.Candidates(),
+        recent = unknown.Snapshot(limit ?? 50),
+    }));
 
 app.MapPost("/v1/knowledge/{id}/approve",
     (string id, HttpRequest request, KnowledgeService svc, DecisionLog decisions) =>

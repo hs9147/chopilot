@@ -36,11 +36,14 @@ public sealed class PersonalizationService
 {
     private readonly IMappingCache _cache;
     private readonly IKnowledgeProvider _knowledge;
+    private readonly UnknownConceptLog _unknownConcepts;
 
-    public PersonalizationService(IMappingCache cache, IKnowledgeProvider knowledge)
+    public PersonalizationService(IMappingCache cache, IKnowledgeProvider knowledge,
+                                  UnknownConceptLog? unknownConcepts = null)
     {
         _cache = cache;
         _knowledge = knowledge;
+        _unknownConcepts = unknownConcepts ?? new UnknownConceptLog();
     }
 
     /// <summary>
@@ -95,7 +98,12 @@ public sealed class PersonalizationService
                               .Select(r => r.Field.Concept)
                               .Distinct()
                               .ToList();
-        if (unknown.Count > 0) return new CorrectionOutcome(null, unknown);
+        if (unknown.Count > 0)
+        {
+            // 거부하되 버리지 않는다 — 이 시도가 온톨로지 결핍의 증거다(ARCHITECTURE §5.5 Signal).
+            _unknownConcepts.Record(userId, req.Signature, req.BusinessObject, unknown, DateTimeOffset.UtcNow);
+            return new CorrectionOutcome(null, unknown);
+        }
 
         var fields = resolved.Select(r => new FieldMapping(
             ElementRef: r.Field.ElementRef,

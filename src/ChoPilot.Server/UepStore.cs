@@ -88,6 +88,22 @@ public sealed class UepStore
     }
 
     /// <summary>
+    /// 전체 사용자의 프로파일 (축별 집계 전용, ARCHITECTURE §5.5 2단계).
+    ///
+    /// <para>
+    /// 개인 격리(D5)를 뚫는 유일한 통로이므로 <b>집계기만 호출한다</b> — 조회 API에 노출하면
+    /// 남의 프로파일이 새어 나간다. 집계 결과가 org로 승격되려면 k인 게이트를 통과해야 하고,
+    /// 문서에 실리는 것은 개인 식별자가 아니라 route와 횟수뿐이다.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<UserEnvironmentProfile> AllProfiles() =>
+        _byUser.Keys.OrderBy(k => k, StringComparer.Ordinal)
+            .Select(Get)
+            .Where(p => p is not null)
+            .Select(p => p!)
+            .ToList();
+
+    /// <summary>
     /// 이 화면 다음에 이어질 화면 후보. 빈도 내림차순 — 다음 작업 제안의 입력.
     /// <paramref name="minCount"/> 미만은 근거가 얇아 제외한다.
     /// </summary>
