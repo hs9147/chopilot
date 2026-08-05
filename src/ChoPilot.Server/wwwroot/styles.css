@@ -138,6 +138,9 @@ input.text {
   border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface); color: var(--text);
 }
+/* 초 단위 간격처럼 짧은 수치 입력 — 기본 폭(150px)은 라벨 흐름을 끊는다 */
+input.text.num-sm { min-width: 0; width: 4.5rem; text-align: right; }
+input.text:disabled { opacity: .55; cursor: not-allowed; }
 .log {
   margin-top: 12px; max-height: 190px; overflow: auto;
   border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;

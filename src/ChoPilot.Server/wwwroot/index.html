@@ -40,6 +40,19 @@
       재생할 때마다 새 ID 부여 <span class="hint">— 같은 파일을 다시 올려 캐시 적중을 확인할 때 필요</span>
     </label>
 
+    <label class="check">
+      <input type="checkbox" id="autoReplay" disabled>
+      자동 반복 적재 —
+      <input type="number" id="autoSeconds" class="text num-sm" min="1" max="3600" step="1" value="10">
+      초 간격
+      <span class="hint">
+        — 마지막에 올린 파일을 이 간격으로 다시 적재한다. <strong>화면을 새로 캡처하지는 않는다</strong>
+        (캡처는 Windows의 <code>chopilot-dump</code>). 적중률·θ 절벽·재추론 백오프가
+        시간에 따라 어떻게 움직이는지 손으로 누르지 않고 보기 위한 것이다.
+      </span>
+    </label>
+    <p id="autoStatus" class="hint"></p>
+
     <div id="uploadLog" class="log" hidden></div>
   </section>
 

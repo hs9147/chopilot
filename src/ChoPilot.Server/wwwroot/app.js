@@ -15,6 +15,7 @@ const PASS = {
 const SCORING_KEY = 'chopilot.measure.scoring';
 const SOURCES_KEY = 'chopilot.measure.sources';   // 재생 ID → 원본 파일명. 새로고침해도 유지된다.
 const ACTOR_KEY = 'chopilot.measure.actor';       // 보정·승격을 기록할 사람
+const AUTO_SECONDS_KEY = 'chopilot.measure.autoSeconds';   // 자동 반복 간격(초)
 
 const state = {
   metrics: null,
@@ -42,6 +43,14 @@ const state = {
   reconcile: null,        // 관측 ↔ 마스터 대사 결과
   myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
   openDraft: null,
+
+  // 자동 반복 적재. batch는 파싱된 관측이라 회차마다 파일을 다시 읽지 않는다.
+  batch: [],
+  autoOn: false,
+  autoSeconds: Number(localStorage.getItem(AUTO_SECONDS_KEY)) || 10,
+  autoTimer: null,
+  autoRounds: 0,
+  autoFailedRounds: 0,
 };
 
 /* ── 유틸 ─────────────────────────────────────────────── */
@@ -96,6 +105,13 @@ function log(message, kind) {
   box.scrollTop = box.scrollHeight;
 }
 
+// 적재 결과의 source 3분류. 미스와 AI 호출은 다르다 — 저신뢰 캐시 재사용은 둘 다 아니다.
+const SOURCE_LABEL = {
+  trusted_cache: '캐시 적중',
+  deferred_cache: '캐시 재사용(θ 미만)',
+  ai: 'AI 추론',
+};
+
 // 덤프 파일은 {signature, observation:{...}} 로 감싸여 있고, 벗겨진 이벤트도 받아들인다.
 function extractObservation(json) {
   const candidate = json.observation || json.Observation || json;
@@ -113,36 +129,129 @@ function withEventId(observation, id) {
   return copy;
 }
 
-async function uploadFiles(fileList) {
+// 파일을 읽어 관측으로 파싱만 한다. 전송과 분리한 것은 자동 반복이 <b>파일을 다시 읽지 않고</b>
+// 같은 관측을 재전송하기 위해서다 — 매 회차 디스크를 다시 읽으면 간격이 파일 크기에 좌우된다.
+async function parseBatch(fileList) {
   const files = Array.from(fileList).filter((f) => f.name.endsWith('.json'));
-  if (files.length === 0) { log('JSON 파일이 없다', 'err'); return; }
+  if (files.length === 0) { log('JSON 파일이 없다', 'err'); return []; }
 
-  const assignNewIds = $('newIds').checked;
-
+  const batch = [];
   for (const file of files) {
     try {
-      let observation = extractObservation(JSON.parse(await file.text()));
+      batch.push({ name: file.name, observation: extractObservation(JSON.parse(await file.text())) });
+    } catch (err) {
+      log(`${file.name} → 읽기 실패: ${err.message}`, 'err');
+    }
+  }
+  return batch;
+}
 
+// 파싱된 관측들을 순서대로 전송. 실패는 세어서 돌려준다 — 자동 반복의 중단 조건이다.
+async function replayBatch(batch) {
+  const assignNewIds = $('newIds').checked;
+  let sent = 0;
+
+  for (const { name, observation } of batch) {
+    try {
+      let payload = observation;
       if (assignNewIds) {
         const stamp = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
-        observation = withEventId(observation, `${file.name.replace(/\.json$/, '')}-${stamp}-${Math.random().toString(36).slice(2, 6)}`);
+        payload = withEventId(observation, `${name.replace(/\.json$/, '')}-${stamp}-${Math.random().toString(36).slice(2, 6)}`);
       }
 
       const result = await api('/v1/observations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(observation),
+        body: JSON.stringify(payload),
       });
 
-      state.sources[result.observation_id] = file.name;
+      state.sources[result.observation_id] = name;
       saveSources();
-      log(`${file.name} → ${result.cache_hit ? '캐시 적중' : 'AI 추론'} · ${shortSig(result.signature)} · ${result.business_object}`, 'ok');
+      sent++;
+      // source로 적는다. cache_hit만 보면 deferred_cache(저신뢰 캐시 재사용)가 'AI 추론'으로
+      // 찍혀, 반복 적재 로그가 매 회차 Bedrock을 부르는 것처럼 보인다 — 미스 ≠ AI 호출이다.
+      log(`${name} → ${SOURCE_LABEL[result.source] || result.source} · ${shortSig(result.signature)} · ${result.business_object}`, 'ok');
     } catch (err) {
-      log(`${file.name} → 실패: ${err.message}`, 'err');
+      log(`${name} → 실패: ${err.message}`, 'err');
     }
   }
 
+  return { sent, failed: batch.length - sent };
+}
+
+async function uploadFiles(fileList) {
+  const batch = await parseBatch(fileList);
+  if (batch.length === 0) return;
+
+  state.batch = batch;          // 자동 반복이 다시 쓸 원본
+  await replayBatch(batch);
   await refreshAll();
+}
+
+/* ── 자동 반복 적재 ───────────────────────────────────── */
+
+/// 전 건이 이만큼 연속 실패하면 멈춘다. 서버가 죽은 뒤 로그를 무한히 채우지 않기 위해서다.
+const AUTO_MAX_FAILED_ROUNDS = 5;
+
+function scheduleAuto() {
+  clearTimeout(state.autoTimer);
+  // setInterval이 아니라 체이닝이다. 한 회차(전송 + 15개 조회)가 간격보다 오래 걸리면
+  // setInterval은 회차를 겹쳐 쏘고, 그러면 지표가 관측이 아니라 브라우저 폴링을 재게 된다.
+  state.autoTimer = setTimeout(autoTick, Math.max(1, state.autoSeconds) * 1000);
+}
+
+async function autoTick() {
+  state.autoTimer = null;
+  if (!state.autoOn || state.batch.length === 0) return;
+
+  const { failed } = await replayBatch(state.batch);
+  state.autoRounds++;
+  state.autoFailedRounds = failed === state.batch.length ? state.autoFailedRounds + 1 : 0;
+
+  if (state.autoFailedRounds >= AUTO_MAX_FAILED_ROUNDS) {
+    log(`자동 반복 중단 — ${AUTO_MAX_FAILED_ROUNDS}회 연속 전 건 실패`, 'err');
+    setAuto(false);
+    await refreshAll();
+    return;
+  }
+
+  await refreshAll();
+  if (state.autoOn) scheduleAuto();   // refreshAll 사이에 사용자가 껐을 수 있다
+}
+
+function setAuto(on) {
+  state.autoOn = on && state.batch.length > 0;
+  $('autoReplay').checked = state.autoOn;
+
+  if (state.autoOn) {
+    state.autoRounds = 0;
+    state.autoFailedRounds = 0;
+    log(`자동 반복 시작 — ${state.batch.length}건 / ${state.autoSeconds}초 간격`);
+    scheduleAuto();
+  } else {
+    clearTimeout(state.autoTimer);
+    state.autoTimer = null;
+  }
+  renderAuto();
+}
+
+function renderAuto() {
+  const box = $('autoStatus');
+  const toggle = $('autoReplay');
+
+  toggle.disabled = state.batch.length === 0;
+  if (state.batch.length === 0) {
+    box.className = 'hint';
+    box.textContent = '파일을 먼저 올려야 반복할 원본이 생긴다. '
+      + '브라우저는 새로고침 후 예전 파일을 다시 읽을 수 없으므로 자동 반복은 항상 꺼진 채로 시작한다.';
+    return;
+  }
+
+  box.className = state.autoOn ? 'warn' : 'hint';
+  box.textContent = state.autoOn
+    ? `반복 중 — ${state.batch.length}건 × ${state.autoRounds}회차, ${state.autoSeconds}초 간격`
+      + (state.autoFailedRounds ? ` · 연속 실패 ${state.autoFailedRounds}/${AUTO_MAX_FAILED_ROUNDS}` : '')
+    : `반복 대상 ${state.batch.length}건 대기 중 (${state.batch.map((b) => b.name).join(', ')})`;
 }
 
 /* ── 조회 & 렌더 ──────────────────────────────────────── */
@@ -190,6 +299,7 @@ async function refreshAll() {
   renderReview();
   renderDecisions();
   renderKnowledge();
+  renderAuto();
   renderStorage();
   renderAuth();
   renderFoundation();
@@ -1186,6 +1296,21 @@ function bind() {
   drop.addEventListener('drop', (e) => uploadFiles(e.dataTransfer.files));
 
   $('refresh').addEventListener('click', refreshAll);
+
+  const autoSeconds = $('autoSeconds');
+  autoSeconds.value = state.autoSeconds;
+  autoSeconds.addEventListener('change', () => {
+    // 숫자가 아니면 기본값으로, 그다음 [1, 3600]으로 자른다. 0·음수가 10과 1로 갈리지 않도록
+    // 순서를 이렇게 둔다 — 상한 1시간은 그보다 길면 반복이 아니라 방치이기 때문이다.
+    const parsed = Number(autoSeconds.value);
+    state.autoSeconds = Math.min(3600, Math.max(1, Number.isFinite(parsed) && parsed > 0 ? parsed : 10));
+    autoSeconds.value = state.autoSeconds;
+    localStorage.setItem(AUTO_SECONDS_KEY, state.autoSeconds);
+    if (state.autoOn) scheduleAuto();   // 다음 회차부터 새 간격
+    renderAuto();
+  });
+
+  $('autoReplay').addEventListener('change', (e) => setAuto(e.target.checked));
 
   const actor = $('actor');
   actor.value = state.actor;
