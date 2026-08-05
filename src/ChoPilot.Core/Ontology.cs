@@ -20,7 +20,7 @@ public static class ProcurementOntology
 {
     public static readonly Concept[] Concepts =
     {
-        new("Material",     "string", new[] { "품목", "품목코드", "자재", "자재코드", "item" }),
+        new("Material",     "string", new[] { "품목", "품목코드", "자재", "자재코드", "item" }, EntityRef: "Item"),
         new("Quantity",     "number", new[] { "수량", "발주수량", "요청수량", "qty" }),
         new("UnitPrice",    "number", new[] { "단가", "공급단가", "unit price" }, Sensitive: true),
         new("TotalAmount",  "number", new[] { "금액", "합계", "총액", "amount" }, Sensitive: true),

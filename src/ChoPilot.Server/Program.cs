@@ -29,12 +29,14 @@ builder.Services.AddSingleton<PersonalizationService>();
 // Curated Knowledge Plane (ARCHITECTURE §5.4 Plane 3) — 온톨로지·규칙의 런타임 진실.
 builder.Services.AddSingleton<KnowledgeStore>();
 builder.Services.AddSingleton<UnknownConceptLog>();
+builder.Services.AddSingleton<EntityStore>();
 builder.Services.AddSingleton<KnowledgeViewRenderer>();
 builder.Services.AddSingleton(sp => new AxisAggregator(
     sp.GetRequiredService<UnknownConceptLog>(),
     sp.GetRequiredService<UepStore>(),
     sp.GetRequiredService<SuggestionFeedbackStore>(),
     sp.GetRequiredService<KnowledgeStore>(),
+    sp.GetRequiredService<EntityStore>(),
     cfg.GetValue<int?>("Knowledge:MinSupport") ?? AxisAggregator.DefaultMinSupport,
     cfg.GetValue<int?>("Knowledge:MinDistinctUsers") ?? AxisAggregator.DefaultMinDistinctUsers));
 builder.Services.AddSingleton<IKnowledgeProvider>(sp => sp.GetRequiredService<KnowledgeStore>());
@@ -94,7 +96,8 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/v1/observations",
     async (ObservationEvent evt, MappingResolver resolver, ObservationStore store,
-           AuditService audit, UepStore uep, IKnowledgeProvider knowledgeProvider) =>
+           AuditService audit, UepStore uep, IKnowledgeProvider knowledgeProvider,
+           EntityStore entities) =>
 {
     // 서명→매핑→BO 구간을 계측한다. 캐시 미스(=Bedrock 호출)와 HIT의 차이가 여기서 드러난다.
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -117,6 +120,9 @@ app.MapPost("/v1/observations",
     // route·title은 UEP를 사람이 읽을 수 있게 만든다: 해시만 남으면 다음작업 제안을 문장으로 쓸 수 없다.
     uep.RecordVisit(evt.UserId, signature, DateTimeOffset.UtcNow,
         SignatureService.NormalizeRoute(evt.Screen.Url), evt.Screen.Title);
+
+    // 엔티티 결정 1단(§6 Deterministic). BO의 비민감 값만 보므로 단가·금액은 애초에 도달하지 않는다.
+    entities.Record(EntityResolver.Extract(bo, knowledge), evt.UserId, signature, DateTimeOffset.UtcNow);
 
     return Results.Ok(new
     {
@@ -178,6 +184,20 @@ app.MapGet("/v1/observations/{id}", (string id, ObservationStore store, AuditSer
     return stored is null
         ? Results.NotFound(new { error = "unknown observation_id" })
         : Results.Ok(MeasurementViews.Detail(stored, gate, audit.CacheHitByEventId().GetValueOrDefault(id)));
+});
+
+// 엔티티 결정 결과 (H5). splits는 같은 실체가 여러 키로 갈렸을 가능성 — 자동 병합하지 않는다.
+app.MapGet("/v1/entities", (EntityStore entities) =>
+{
+    var splits = entities.Splits();
+    return Results.Ok(new
+    {
+        count = entities.All().Count,
+        splitCandidates = splits.Count,
+        entities = entities.All(),
+        links = entities.Links(),
+        splits,
+    });
 });
 
 // route별 서명 그룹핑 — 같은 화면이 여러 서명으로 갈렸는지가 캐시 적중률 미달의 1차 원인.

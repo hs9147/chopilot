@@ -73,8 +73,12 @@ public class AxisAggregatorTests
         uep = new UepStore();
         suggestions = new SuggestionFeedbackStore();
         knowledge = new KnowledgeStore();
-        return new AxisAggregator(unknown, uep, suggestions, knowledge, minSupport, minUsers);
+        return new AxisAggregator(unknown, uep, suggestions, knowledge, new EntityStore(),
+            minSupport, minUsers);
     }
+
+    private static AxisAggregator WithEntities(EntityStore entities, KnowledgeStore knowledge) =>
+        new(new UnknownConceptLog(), new UepStore(), new SuggestionFeedbackStore(), knowledge, entities);
 
     [Fact]
     public void UnknownConcept_BecomesDraft_WhenBothGatesPass()

@@ -33,6 +33,7 @@ const state = {
   knowledge: [],          // 지식 문서(초안 + 게시)
   knowledgeVersion: 0,
   signals: null,          // 미지 개념 후보
+  entities: null,         // 엔티티 결정 결과(H5)
   myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
   openDraft: null,
 };
@@ -146,10 +147,10 @@ const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor 
 async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
-           knowledge, signals] = await Promise.all([
+           knowledge, signals, entities] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
-      api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'),
+      api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -162,6 +163,7 @@ async function refreshAll() {
     state.knowledge = knowledge.items;
     state.knowledgeVersion = knowledge.version;
     state.signals = signals;
+    state.entities = entities;
     state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
@@ -765,13 +767,14 @@ function verdictRows() {
     ['H3', 'AI 매핑 정확률', '≥ 90%', ratio(state.scoring.h3Ai, state.scoring.h3Total), (v) => v >= PASS.h3, '수기 채점'],
     ['H3b', '캐시 적중률', '≥ 95%', m && m.observations ? m.cacheHitRatio : null, (v) => v >= PASS.h3b, '자동'],
     ['H4', '잔존 PII 0건', '0건', m && m.observations ? residualTotal() : null, (v) => v === 0, '자동(반증)'],
+    ['H5', '엔티티 갈림', '0건', state.entities ? state.entities.splitCandidates : null, (v) => v === 0, '자동(ERP 축 1단)'],
     ['H6', '지연 p95', '≤ 3000ms', m && m.observations ? m.latencyP95Ms : null, (v) => v <= PASS.h6, '서버 구간만'],
   ];
 
   return rows.map(([id, name, target, value, ok, note]) => {
     let display = '—', pill = '<span class="badge">미측정</span>';
     if (value !== null && value !== undefined) {
-      display = id === 'H4' ? `${value}건` : id === 'H6' ? `${value} ms` : pct(value);
+      display = (id === 'H4' || id === 'H5') ? `${value}건` : id === 'H6' ? `${value} ms` : pct(value);
       pill = ok(value) ? '<span class="pill pill-pass">PASS</span>' : '<span class="pill pill-fail">FAIL</span>';
     }
     return { id, name, target, display, pill, note, value, passed: value === null || value === undefined ? null : ok(value) };
@@ -864,6 +867,17 @@ function buildMarkdown() {
          ...state.signals.candidates.map((c) => `| ${c.term} | ${c.attempts} | ${c.distinctUsers} |`)]
       : ['- 거부된 개념 시도 없음 — 온톨로지 결핍이 관측되지 않았거나 보정을 아무도 시도하지 않았다.']),
     '',
+    '## 엔티티 결정 (H5, ARCHITECTURE §6 1단)',
+    '',
+    state.entities
+      ? `- 엔티티 ${state.entities.count}종 · 공동 출현 ${state.entities.links.length}쌍 · 갈림 후보 ${state.entities.splitCandidates}건`
+      : '- 미측정',
+    ...(state.entities && state.entities.splits.length
+      ? ['', '| 타입 | 갈린 키 |', '|------|--------|',
+         ...state.entities.splits.map((s) => `| ${s.type} | ${s.keys.join(' / ')} |`),
+         '', '> 자동 병합하지 않는다 — 잘못 합치면 서로 다른 실체가 하나가 되고 오류가 전파된다.']
+      : []),
+    '',
     '## 제안 수락률 (ARCHITECTURE §9)',
     '',
     state.suggestions && state.suggestions.impressions
@@ -935,6 +949,7 @@ function bind() {
       knowledgeVersion: state.knowledgeVersion,
       knowledge: state.knowledge,
       signals: state.signals,
+      entities: state.entities,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

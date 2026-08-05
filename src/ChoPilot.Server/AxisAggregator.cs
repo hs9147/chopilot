@@ -35,18 +35,20 @@ public sealed class AxisAggregator
     private readonly UepStore _uep;
     private readonly SuggestionFeedbackStore _suggestions;
     private readonly KnowledgeStore _knowledge;
+    private readonly EntityStore _entities;
     private readonly int _minSupport;
     private readonly int _minDistinctUsers;
 
     public AxisAggregator(
         UnknownConceptLog unknownConcepts, UepStore uep,
-        SuggestionFeedbackStore suggestions, KnowledgeStore knowledge,
+        SuggestionFeedbackStore suggestions, KnowledgeStore knowledge, EntityStore entities,
         int minSupport = DefaultMinSupport, int minDistinctUsers = DefaultMinDistinctUsers)
     {
         _unknownConcepts = unknownConcepts;
         _uep = uep;
         _suggestions = suggestions;
         _knowledge = knowledge;
+        _entities = entities;
         _minSupport = minSupport;
         _minDistinctUsers = minDistinctUsers;
     }
@@ -63,8 +65,53 @@ public sealed class AxisAggregator
         AggregateUnknownConcepts(drafts, skipped, at);
         AggregateSharedTransitions(drafts, skipped, at);
         AggregateRejectedSuggestions(drafts, skipped, at);
+        AggregateItemCharacteristics(drafts, skipped, at);
 
         return new AggregationResult(drafts, skipped);
+    }
+
+    /// <summary>
+    /// 엔티티 공동 출현 → 품목 특성 초안 (품목 축).
+    ///
+    /// <para>
+    /// <b>값이 실리는 유일한 축이다.</b> "M-001은 주로 A사에서 조달"이라고 써야 쓸모가 있는데
+    /// M-001과 A사는 관측된 값이다. 그래서 게이트가 곧 프라이버시 경계다 — 한 사람에게서
+    /// 한 번 관측된 것은 <b>레코드</b>이고, 여러 사람에게서 반복 관측된 공동 출현이라야
+    /// <b>지식</b>이다. 민감 개념(단가·금액)은 마스킹으로 값이 서버에 도달하지 않으므로
+    /// 구조적으로 여기 실릴 수 없다.
+    /// </para>
+    /// </summary>
+    private void AggregateItemCharacteristics(List<KnowledgeDoc> drafts, List<string> skipped, DateTimeOffset at)
+    {
+        foreach (var link in _entities.Links())
+        {
+            // 지금은 품목↔거래처만 문서화한다. 다른 조합은 의미가 정해지기 전까지 보류.
+            var (item, company) =
+                (link.FromType, link.ToType) switch
+                {
+                    ("Item", "Company") => (link.FromKey, link.ToKey),
+                    ("Company", "Item") => (link.ToKey, link.FromKey),
+                    _ => (null, null),
+                };
+            if (item is null || company is null) continue;
+
+            var id = $"note.item.{Slug(item)}";
+            if (_knowledge.Get(id) is not null) { skipped.Add($"{id}: 이미 존재"); continue; }
+            if (link.Count < _minSupport) { skipped.Add($"{id}: 공동 출현 {link.Count}회 < {_minSupport}"); continue; }
+            if (link.DistinctUsers < _minDistinctUsers) { skipped.Add($"{id}: {link.DistinctUsers}명 < {_minDistinctUsers}명(k인 게이트)"); continue; }
+
+            var body = new StringBuilder()
+                .AppendLine($"품목 **{item}** 은 거래처 **{company}** 와 함께 {link.DistinctUsers}명에게서 {link.Count}회 관측됐다.")
+                .AppendLine()
+                .AppendLine("승인하면 이 품목의 통상 거래처로 기록되어 다음 작업 제안에 쓰인다.")
+                .AppendLine("확인할 것: 실제로 주 거래처인가, 아니면 관측 기간에 우연히 몰린 것인가?")
+                .ToString();
+
+            drafts.Add(Draft(id, KnowledgeType.Note, $"품목 특성: {item}", body, at,
+                new KnowledgeProvenance(new List<string> { "entity.cooccurrence" },
+                    link.Count, link.DistinctUsers, link.LastSeen),
+                axis: KnowledgeAxis.Item));
+        }
     }
 
     /// <summary>거부된 보정 시도 → 개념 초안. 온톨로지 결핍의 가장 직접적인 증거다.</summary>
@@ -182,9 +229,10 @@ public sealed class AxisAggregator
 
     private static KnowledgeDoc Draft(
         string id, string type, string title, string body, DateTimeOffset at,
-        KnowledgeProvenance provenance, Concept? concept = null) => new(
+        KnowledgeProvenance provenance, Concept? concept = null,
+        string axis = KnowledgeAxis.Domain) => new(
         Id: id,
-        Axis: KnowledgeAxis.Domain,
+        Axis: axis,
         Kind: KnowledgeKind.Curated,
         Type: type,
         Scope: "global",
