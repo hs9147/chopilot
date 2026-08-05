@@ -227,11 +227,12 @@ public class SuggestionFeedbackEndpointTests
         var client = server.CreateClient();
         var (obs, suggestion) = await ShowGuide(client, Event());
 
-        // 본문이 사용자를 정하면 누구나 남의 판단을 위조할 수 있다 → 헤더만 받는다
+        // 본문이 사용자를 정하면 누구나 남의 판단을 위조할 수 있다 → 주체는 관문에서만 온다
         var resp = await client.PostAsJsonAsync("/v1/suggestions/feedback",
             new SuggestionFeedbackRequest(obs, suggestion, "accepted"));
 
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        // 본문이 틀린 게 아니라 신원이 없다 — 401이지 400이 아니다
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
     [Fact]

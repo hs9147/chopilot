@@ -335,7 +335,7 @@ public class PersonalizationApiTests
     {
         using var factory = NewServer();
         var resp = await ClientAs(factory, null).GetAsync("/v1/uep");
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
     [Fact]
@@ -371,7 +371,7 @@ public class PersonalizationApiTests
             new CorrectionRequest("sha256:test", "PurchaseRequest",
                 new() { new CorrectionField("n2", "Material") }));
 
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
     [Fact]
@@ -425,6 +425,6 @@ public class PersonalizationApiTests
         var resp = await ClientAs(factory, null).PostAsJsonAsync("/v1/review/promote",
             new PromoteRequest("sig", "global"));
 
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 }

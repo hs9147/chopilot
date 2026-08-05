@@ -102,6 +102,11 @@ builder.Services.AddSingleton(sp => new KnowledgeService(
     sp.GetRequiredService<IMappingCache>(),
     cfg.GetValue<double?>("Mapping:ThetaHigh") ?? 0.8));
 
+// 요청 주체 해석 (ARCHITECTURE §8). 검증하지 않는 헤더 방식은 운영 환경에서 기동을 거부한다 —
+// 경고 로그로 두면 아무도 읽지 않고, 그 서버는 헤더 한 줄로 누구든 사칭할 수 있는 채로 돈다.
+builder.Services.AddSingleton(_ =>
+    AuthenticationSetup.Create(cfg, builder.Environment.IsProduction()));
+
 // 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
 builder.Services.AddSingleton(_ => new PrivacyGate(policyVersion: cfg["Privacy:PolicyVersion"] ?? "1.0"));
 
@@ -163,6 +168,15 @@ var app = builder.Build();
                  app.Services.GetRequiredService<CompletionStore>(),
              }) _ = eager;
 
+    var auth = app.Services.GetRequiredService<IUserPrincipalResolver>();
+    var authLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Auth");
+    if (auth.Verifies)
+        authLog.LogInformation("주체 해석: {Method} (검증됨)", auth.Method);
+    else
+        authLog.LogWarning("주체 해석: {Method} — 검증되지 않는다. " +
+            "{Header} 헤더를 대는 누구든 다른 사용자로 행세할 수 있으므로 " +
+            "신뢰 경계 밖(VPC/mTLS 밖)에 노출하면 안 된다.", auth.Method, RequestUser.Header);
+
     var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Storage");
     if (journals is FileJournalFactory files)
     {
@@ -178,11 +192,22 @@ var app = builder.Build();
     }
 }
 
+// 주체 관문은 라우팅보다 앞이다 — 엔드포인트마다 인증을 반복하면 그중 하나는 반드시 빠진다.
+app.UseMiddleware<PrincipalMiddleware>();
+
 // 측정 대시보드(wwwroot/index.html). PHASE0-MEASUREMENT의 jq/curl 절차를 화면으로 대체한다.
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// 인증 상태 (ARCHITECTURE §8). verified=false면 헤더를 대는 누구든 사칭할 수 있다는 뜻이다.
+app.MapGet("/v1/auth", (IUserPrincipalResolver resolver, HttpRequest request) => Results.Ok(new
+{
+    method = resolver.Method,
+    verified = resolver.Verifies,
+    principal = RequestUser.Principal(request)?.UserId,
+}));
 
 // 영속화 상태 (ARCHITECTURE §11). durable=false면 재시작에 전부 사라진다는 뜻이다.
 app.MapGet("/v1/storage", (IJournalFactory journals) =>
@@ -345,8 +370,8 @@ app.MapPost("/v1/foundation/refresh",
     async (HttpRequest request, FoundationStore foundation, EntityStore entities,
            DecisionLog decisions, CancellationToken ct) =>
 {
-    if (RequestUser.From(request) is not { } actor)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
 
     var results = await foundation.RefreshAsync(FoundationStore.QueryFrom(entities), ct);
     var failed = results.Where(r => !r.Ok).ToList();
@@ -381,8 +406,8 @@ app.MapGet("/v1/signatures", (ObservationStore store) =>
 // 자기 UEP 조회 — 화면 사용 빈도/최근성(D5, Exit ⑤). 남의 프로파일은 조회할 수 없다.
 app.MapGet("/v1/uep", (HttpRequest request, UepStore uep) =>
 {
-    if (RequestUser.From(request) is not { } userId)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var userId) is { } unauthenticated)
+        return unauthenticated;
 
     var profile = uep.Get(userId);
     return profile is null
@@ -438,8 +463,8 @@ app.MapGet("/v1/knowledge/{id}",
 
 app.MapPost("/v1/knowledge", (HttpRequest request, KnowledgeDoc doc, KnowledgeService svc) =>
 {
-    if (RequestUser.From(request) is not { } author)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var author) is { } unauthenticated)
+        return unauthenticated;
 
     var (draft, error) = svc.Submit(doc, author);
     return draft is null ? Results.BadRequest(new { error }) : Results.Ok(draft);
@@ -451,8 +476,8 @@ app.MapPost("/v1/knowledge/aggregate",
     async (HttpRequest request, AxisAggregator aggregator, KnowledgeService svc,
            IKnowledgeEditor editor, bool? dryRun, CancellationToken ct) =>
 {
-    if (RequestUser.From(request) is not { } actor)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
 
     var result = aggregator.Aggregate(DateTimeOffset.UtcNow);
     if (dryRun == true)
@@ -500,8 +525,8 @@ app.MapGet("/v1/knowledge/signals", (UnknownConceptLog unknown, int? limit) =>
 app.MapPost("/v1/knowledge/{id}/approve",
     (string id, HttpRequest request, KnowledgeService svc, DecisionLog decisions) =>
 {
-    if (RequestUser.From(request) is not { } approver)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var approver) is { } unauthenticated)
+        return unauthenticated;
 
     var (doc, error) = svc.Approve(id, approver);
     if (doc is null) return Results.BadRequest(new { error });
@@ -514,8 +539,8 @@ app.MapPost("/v1/knowledge/{id}/approve",
 app.MapPost("/v1/knowledge/{id}/deprecate",
     (string id, HttpRequest request, KnowledgeService svc, DecisionLog decisions) =>
 {
-    if (RequestUser.From(request) is not { } actor)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
 
     var outcome = svc.Deprecate(id, actor);
     if (outcome.Doc is null) return Results.BadRequest(new { error = outcome.Error });
@@ -533,8 +558,8 @@ app.MapGet("/v1/review", (PersonalizationService svc, int? limit) =>
 app.MapPost("/v1/review/promote",
     (HttpRequest request, PromoteRequest req, PersonalizationService svc, DecisionLog decisions) =>
 {
-    if (RequestUser.From(request) is not { } actor)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
 
     var promoted = svc.Promote(req);
     if (promoted is null) return Results.NotFound(new { error = "unknown signature/scope" });
@@ -548,8 +573,8 @@ app.MapPost("/v1/review/promote",
 app.MapPost("/v1/correction",
     (HttpRequest request, CorrectionRequest req, PersonalizationService svc, DecisionLog decisions) =>
 {
-    if (RequestUser.From(request) is not { } userId)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var userId) is { } unauthenticated)
+        return unauthenticated;
 
     var outcome = svc.ApplyCorrection(userId, req);
     if (!outcome.Accepted)
@@ -570,8 +595,8 @@ app.MapPost("/v1/correction",
 app.MapPost("/v1/suggestions/feedback",
     (HttpRequest request, SuggestionFeedbackRequest req, SuggestionFeedbackStore suggestions) =>
 {
-    if (RequestUser.From(request) is not { } userId)
-        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+    if (RequestUser.Require(request, out var userId) is { } unauthenticated)
+        return unauthenticated;
 
     var outcome = SuggestionOutcome.Normalize(req.Outcome);
     if (!SuggestionOutcome.IsDecision(outcome))

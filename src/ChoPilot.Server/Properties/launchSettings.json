@@ -1,0 +1,19 @@
+{
+  "//": [
+    "ASP.NET Core는 ASPNETCORE_ENVIRONMENT가 없으면 Production으로 본다.",
+    "그리고 Production에서 검증 없는 인증(Auth:Mode=header)은 기동이 거부된다(ARCHITECTURE §8).",
+    "로컬 실행이 그 방어선에 걸리지 않도록 여기서 Development를 선언한다 —",
+    "launchSettings는 dotnet run에만 적용되고 배포된 컨테이너에는 적용되지 않으므로,",
+    "실제 배포는 여전히 Production 기본값으로 떨어져 방어선이 살아 있다."
+  ],
+  "profiles": {
+    "ChoPilot.Server": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "applicationUrl": "http://localhost:5080",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

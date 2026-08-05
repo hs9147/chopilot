@@ -271,10 +271,32 @@ AI 프롬프트가 되지 않는다.
   민감 여부를 알 수 없으므로 **400으로 거부**한다 — 통과시키면 `Sensitive=false`로 굳어져
   Business Object의 민감값 억제가 무력화된다.
 
-> ⚠️ **`X-ChoPilot-User`는 인증이 아니다.** 헤더 값을 그대로 신뢰한다.
-> 개인 스코프의 읽기·쓰기가 본문·쿼리가 아닌 **한 곳(`RequestUser`)만 통과**하도록 좁혀 둔
-> 자리이며, 실제 인증(mTLS/OIDC)이 들어갈 seam이다. 그때까지 이 서버를 신뢰 경계 밖에
-> 노출하면 안 된다(ARCHITECTURE §8: VPC 내부, mTLS).
+### 인증 — 누가 요청했는가
+
+주체는 미들웨어 **한 곳**에서 정해지고, 엔드포인트는 읽기만 한다. 본문·쿼리로는 사용자를
+받지 않는다 — 본문이 사용자를 정하면 누구나 남의 personal 스코프에 매핑을 심을 수 있고,
+D5의 격리가 스코프 문자열로만 존재하게 된다.
+
+| `Auth:Mode` | 하는 일 | 쓰는 곳 |
+|---|---|---|
+| `header` (기본) | `X-ChoPilot-User` 헤더를 그대로 믿는다 — **검증이 없다** | 로컬 개발·측정 콘솔 |
+| `jwt` | Bearer 토큰의 **서명·발급자·수신자·만료**를 검증하고 `sub`를 주체로 쓴다 | 그 밖의 모든 경우 |
+
+```bash
+Auth__Mode=jwt \
+Auth__Jwt__SigningKey=… Auth__Jwt__Issuer=https://idp.example Auth__Jwt__Audience=chopilot \
+dotnet run --project src/ChoPilot.Server
+
+curl localhost:5080/v1/auth   # method · verified
+```
+
+> ⚠️ **`header` 모드로는 운영 환경에서 서버가 뜨지 않는다.** 경고 로그로 두면 아무도 읽지
+> 않고, 그 서버는 헤더 한 줄로 누구든 사칭할 수 있는 채로 돈다. 정말 신뢰 경계 안(VPC/mTLS)
+> 이라면 `Auth:AllowUnverifiedInProduction=true`로 **명시**해야 한다 — 사고가 아니라 결정이
+> 되도록. 로컬 `dotnet run`은 `launchSettings.json`이 Development를 선언해 걸리지 않는다.
+
+신원이 없는 요청은 **401**이다(400이 아니다) — 클라이언트가 고칠 것은 본문이 아니라
+자격증명이고, jwt 모드에서는 `WWW-Authenticate: Bearer`가 함께 나간다.
 
 ### 다음 작업 제안 · 판단 수집 API
 

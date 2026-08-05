@@ -283,7 +283,7 @@ MCP 클라이언트는 `initialize` → `notifications/initialized` → `tools/c
 | 캐시 적중률(정상상태) | ≥ 95% (AI 호출 최소화) |
 | 매핑당 AI 비용 | Phase 0 실측 예산 내 |
 | VDI 리소스 | 세션 여유 내(CPU/메모리 상한 준수) |
-| 보안 | mTLS, VPC 내부, SSE-KMS, 전 관측 Audit |
+| 보안 | mTLS, VPC 내부, SSE-KMS, 전 관측 Audit. 주체 인증은 미들웨어 한 곳(ARCHITECTURE §8.1) — 검증 없는 방식은 운영 기동 거부 |
 | 가용성 | 서버 장애 시 클라이언트 스풀 후 재전송 |
 | 내구성 | `Storage:Path` 설정 시 서버 저장소가 저널로 남아 재시작에 살아남는다 (ARCHITECTURE §12) |
 

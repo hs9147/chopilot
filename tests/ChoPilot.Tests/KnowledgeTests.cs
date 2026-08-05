@@ -322,10 +322,10 @@ public class KnowledgeApiTests
 
         var submit = await client.SendAsync(WithUser(HttpMethod.Post, "/v1/knowledge", null,
             ConceptDocJson("X", "엑스")));
-        Assert.Equal(HttpStatusCode.BadRequest, submit.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, submit.StatusCode);
 
         var approve = await client.SendAsync(WithUser(HttpMethod.Post, "/v1/knowledge/concept.Material/approve", null));
-        Assert.Equal(HttpStatusCode.BadRequest, approve.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, approve.StatusCode);
     }
 
     [Fact]

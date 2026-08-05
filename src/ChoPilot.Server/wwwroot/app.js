@@ -37,6 +37,7 @@ const state = {
   entities: null,         // 엔티티 결정 결과(H5)
   completions: null,      // 작업 완료 신호 집계(필수 필드 규칙의 증거)
   storage: null,          // 영속화 상태 — durable=false면 재시작에 전부 사라진다
+  auth: null,             // 주체 해석 방식 — verified=false면 헤더로 누구든 사칭할 수 있다
   foundation: null,       // 기반 출처 상태 + 마스터 요약
   reconcile: null,        // 관측 ↔ 마스터 대사 결과
   myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
@@ -152,12 +153,12 @@ const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor 
 async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
-           knowledge, signals, entities, foundation, reconcile, completions, storage] = await Promise.all([
+           knowledge, signals, entities, foundation, reconcile, completions, storage, auth] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
       api('/v1/foundation'), api('/v1/foundation/reconcile'), api('/v1/completions?limit=1'),
-      api('/v1/storage'),
+      api('/v1/storage'), api('/v1/auth'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -175,6 +176,7 @@ async function refreshAll() {
     state.reconcile = reconcile;
     state.completions = completions;
     state.storage = storage;
+    state.auth = auth;
     state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
@@ -189,6 +191,7 @@ async function refreshAll() {
   renderDecisions();
   renderKnowledge();
   renderStorage();
+  renderAuth();
   renderFoundation();
   renderObservations();
   renderVerdict();
@@ -561,6 +564,26 @@ async function aggregate(dryRun) {
     msg.className = 'warn';
     msg.textContent = `집계 실패: ${err.message}`;
   }
+}
+
+/* ── 인증 ─────────────────────────────────────────────── */
+
+// 이 배지가 노란색이면 이 서버는 신뢰 경계 밖에 두면 안 된다 — 헤더 한 줄로 누구든 사칭한다.
+function renderAuth() {
+  const pill = $('auth');
+  const a = state.auth;
+
+  if (!a) {
+    pill.className = 'pill pill-muted';
+    pill.textContent = '인증 —';
+    return;
+  }
+
+  pill.className = a.verified ? 'pill pill-pass' : 'pill pill-warn';
+  pill.textContent = a.verified ? `인증 ${a.method}` : '인증 없음 (헤더 자칭)';
+  pill.title = a.verified
+    ? '토큰의 서명·발급자·수신자·만료를 검증한다.'
+    : 'X-ChoPilot-User 헤더를 그대로 믿는다. 운영 환경에서는 서버가 기동을 거부한다.';
 }
 
 /* ── 영속화 ───────────────────────────────────────────── */
@@ -1086,6 +1109,12 @@ function buildMarkdown() {
          '', '> 자동 병합하지 않는다 — 잘못 합치면 서로 다른 실체가 하나가 되고 오류가 전파된다.']
       : []),
     '',
+    '## 인증',
+    '',
+    state.auth && state.auth.verified
+      ? `- 주체 해석 \`${state.auth.method}\` — 서명·발급자·수신자·만료를 검증한다`
+      : '- **검증 없음.** `X-ChoPilot-User` 헤더를 그대로 믿는다 — 이 리포트의 사용자별 수치는 자칭에 근거한다.',
+    '',
     '## 영속화',
     '',
     state.storage && state.storage.durable
@@ -1203,6 +1232,7 @@ function bind() {
       reconcile: state.reconcile,
       completions: state.completions,
       storage: state.storage,
+      auth: state.auth,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

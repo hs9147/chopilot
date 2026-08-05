@@ -335,7 +335,7 @@ public class AggregationApiTests
         using var server = NewServer();
         var resp = await server.CreateClient()
             .SendAsync(WithUser(HttpMethod.Post, "/v1/knowledge/aggregate", null));
-        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
     }
 
     [Fact]

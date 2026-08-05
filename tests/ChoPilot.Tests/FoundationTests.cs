@@ -796,7 +796,7 @@ public class FoundationApiTests
         var client = server.CreateClient();
 
         var anonymous = await client.SendAsync(WithUser(HttpMethod.Post, "/v1/foundation/refresh", null));
-        Assert.Equal(HttpStatusCode.BadRequest, anonymous.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymous.StatusCode);
 
         var refreshed = await client.SendAsync(WithUser(HttpMethod.Post, "/v1/foundation/refresh", "ops"));
         Assert.Equal(HttpStatusCode.OK, refreshed.StatusCode);

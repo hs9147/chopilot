@@ -7,6 +7,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- JWT 검증. 인증은 손으로 짜지 않는다 — 서명·발급자·수신자·만료 검증이 전부 여기 있다. -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.1.2" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\ChoPilot.Core\ChoPilot.Core.csproj" />
     <ProjectReference Include="..\ChoPilot.Mapping\ChoPilot.Mapping.csproj" />
   </ItemGroup>
