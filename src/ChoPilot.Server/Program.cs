@@ -60,6 +60,20 @@ else
     builder.Services.AddSingleton<IAiMapper, StubAiMapper>();
 }
 
+// 지식 초안 서술(§5.5 3단계). 기본은 AI 없음 — 루프는 LLM 없이도 완결된다.
+// Knowledge:UseEditor=true 일 때만 배치에서 초안 1건당 1회 호출된다.
+if (cfg.GetValue<bool>("UseBedrock") && cfg.GetValue<bool>("Knowledge:UseEditor"))
+{
+    builder.Services.AddSingleton<IKnowledgeEditor>(sp => new BedrockKnowledgeEditor(
+        sp.GetRequiredService<IAmazonBedrockRuntime>(),
+        cfg["Knowledge:EditorModelId"] ?? cfg["Aws:BedrockModelId"]
+            ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
+}
+else
+{
+    builder.Services.AddSingleton<IKnowledgeEditor, PassthroughKnowledgeEditor>();
+}
+
 builder.Services.AddSingleton(sp => new MappingResolver(
     sp.GetRequiredService<IMappingCache>(),
     sp.GetRequiredService<IAiMapper>(),
@@ -247,7 +261,8 @@ app.MapPost("/v1/knowledge", (HttpRequest request, KnowledgeDoc doc, KnowledgeSe
 // 축별 집계 → 초안 생성 (ARCHITECTURE §5.5 1~2단계). 운영은 일 배치, 여기선 수동 트리거.
 // LLM은 여기 없다 — 결정적 집계만으로 초안이 만들어지고, AI는 본문 품질 개선(3단계)에만 쓰인다.
 app.MapPost("/v1/knowledge/aggregate",
-    (HttpRequest request, AxisAggregator aggregator, KnowledgeService svc, bool? dryRun) =>
+    async (HttpRequest request, AxisAggregator aggregator, KnowledgeService svc,
+           IKnowledgeEditor editor, bool? dryRun, CancellationToken ct) =>
 {
     if (RequestUser.From(request) is not { } actor)
         return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
@@ -261,7 +276,10 @@ app.MapPost("/v1/knowledge/aggregate",
     var rejected = new List<string>();
     foreach (var draft in result.Drafts)
     {
-        var (doc, error) = svc.Submit(draft, "aggregator");
+        // 편집자는 본문만 바꾼다. 개념·민감 여부·규칙은 집계기가 만든 것을 그대로 쓴다 —
+        // LLM이 페이로드를 쓸 수 있으면 문서 편집이 마스킹 방어선으로 가는 주입 경로가 된다.
+        var body = await editor.DescribeAsync(draft, ct);
+        var (doc, error) = svc.Submit(draft with { Body = body }, "aggregator");
         if (doc is not null) submitted.Add(doc); else rejected.Add($"{draft.Id}: {error}");
     }
 

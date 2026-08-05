@@ -431,3 +431,70 @@ public class KnowledgeApiTests
             c => c.GetProperty("name").GetString() == "OrderNo");
     }
 }
+
+public class KnowledgeEditorTests
+{
+    private static readonly KnowledgeDoc Draft = new(
+        Id: "concept.결제조건", Axis: KnowledgeAxis.Domain, Kind: KnowledgeKind.Curated,
+        Type: KnowledgeType.Concept, Scope: "global", Title: "개념 후보: 결제조건",
+        Concept: new Concept("결제조건", "string", new[] { "결제조건" }, Sensitive: true),
+        Required: null, Hint: null, Body: "집계기가 쓴 본문", Version: 0,
+        Status: KnowledgeStatus.PendingReview,
+        Provenance: new KnowledgeProvenance(new List<string> { "correction.unknown_concept" }, 3, 2, null),
+        CreatedBy: "aggregator", ApprovedBy: null, UpdatedAt: DateTimeOffset.UnixEpoch);
+
+    [Fact]
+    public async Task Passthrough_KeepsAggregatorBody_WithoutCallingAnything()
+    {
+        // 루프는 LLM 없이도 완결된다 — 편집자는 서술 품질만 올리는 선택 사항이다.
+        Assert.Equal("집계기가 쓴 본문", await new PassthroughKnowledgeEditor().DescribeAsync(Draft));
+    }
+
+    [Fact]
+    public void Evidence_CarriesProvenance_ButNoObservedValues()
+    {
+        var evidence = BedrockKnowledgeEditor.Evidence(Draft);
+
+        Assert.Contains("3회", evidence);
+        Assert.Contains("2명", evidence);
+        Assert.Contains("승인자가 확정", evidence);      // 민감 여부는 모델이 정하지 않는다
+        Assert.Contains("집계기가 쓴 본문", evidence);
+    }
+
+    [Fact]
+    public void Parse_ReturnsNull_OnEmptyOrMalformed_SoCallerKeepsOriginal()
+    {
+        Assert.Null(BedrockKnowledgeEditor.Parse("""{"content":[]}"""));
+        Assert.Null(BedrockKnowledgeEditor.Parse("""{"content":[{"type":"text","text":"   "}]}"""));
+        Assert.Null(BedrockKnowledgeEditor.Parse("""{"stop_reason":"refusal"}"""));
+        Assert.Equal("다듬은 본문",
+            BedrockKnowledgeEditor.Parse("""{"content":[{"type":"text","text":"  다듬은 본문 "}]}"""));
+    }
+}
+
+public class BedrockOntologyFilterTests
+{
+    [Fact]
+    public void Parse_Accepts_NewlyPublishedConcept_NotOnlySeed()
+    {
+        // 환각 필터를 하드코딩 시드로 걸면 새로 게시된 개념이 프롬프트엔 들어갔는데
+        // 응답에서 조용히 버려진다 — 온톨로지 외부화가 무의미해지는 결함.
+        var store = new KnowledgeStore();
+        store.Submit(new KnowledgeDoc(
+            "concept.결제조건", KnowledgeAxis.Domain, KnowledgeKind.Curated, KnowledgeType.Concept,
+            "global", "결제조건", new Concept("결제조건", "string", new[] { "결제조건" }),
+            null, null, "", 0, KnowledgeStatus.PendingReview, KnowledgeProvenance.Seed,
+            "t", null, DateTimeOffset.UnixEpoch), "hong", DateTimeOffset.UnixEpoch);
+        store.Approve("concept.결제조건", "kim", DateTimeOffset.UnixEpoch);
+
+        var body = """
+        {"content":[{"type":"text","text":"{\"business_object\":\"PurchaseRequest\",\"fields\":[{\"element_ref\":\"n2\",\"concept\":\"결제조건\",\"confidence\":0.9},{\"element_ref\":\"n9\",\"concept\":\"환각개념\",\"confidence\":0.9}]}"}]}
+        """;
+
+        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", store.Current.Concepts);
+
+        var field = Assert.Single(inference.Fields);
+        Assert.Equal("결제조건", field.Concept);      // 게시된 개념은 통과
+        // 환각 방지는 그대로 — 온톨로지에 없는 개념은 여전히 버려진다
+    }
+}

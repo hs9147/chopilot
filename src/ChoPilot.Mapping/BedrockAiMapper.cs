@@ -81,8 +81,12 @@ public sealed class BedrockAiMapper : IAiMapper
             foreach (var f in arr.EnumerateArray())
             {
                 var conceptName = f.GetProperty("concept").GetString() ?? "";
-                var concept = ProcurementOntology.ByName(conceptName);
-                if (concept is null) continue; // 온톨로지에 없는 개념은 무시(환각 방지)
+
+                // 환각 방지 필터는 <b>이 요청에 실린 온톨로지</b>로 건다 — 하드코딩 시드로 걸면
+                // 새로 게시된 개념이 프롬프트에는 들어갔는데 응답에서 조용히 버려진다.
+                var concept = Array.Find(ontology,
+                    c => c.Name.Equals(conceptName, StringComparison.OrdinalIgnoreCase));
+                if (concept is null) continue;
 
                 fields.Add(new FieldMapping(
                     ElementRef: f.GetProperty("element_ref").GetString() ?? "",
