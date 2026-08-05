@@ -178,6 +178,44 @@ curl -H "$U" -X POST localhost:5080/v1/knowledge/{id}/deprecate        # 폐기 
 `GET /v1/knowledge?axis=user`는 **저장되지 않은** 개인 업무 프로파일을 요청 시 렌더한다 —
 자주 쓰는 화면, 업무 흐름, 반복 거부한 제안. 본인만 조회할 수 있다(D5).
 
+### 기반 정보 — 무료 API·MCP 출처와 대사
+
+네 축 중 기반 축만 **계보가 반대**다. 거래처가 실재하는지, 그 날이 공휴일인지는 화면을
+아무리 봐도 알 수 없다 — 외부 출처가 마스터를 주고 관측은 거기에 **대사**될 뿐이다.
+관측된 값이 마스터로 올라가는 경로는 의도적으로 없다(ARCHITECTURE §5.6).
+
+```bash
+curl        localhost:5080/v1/foundation             # 마스터 요약 + 출처 상태·라이선스
+curl -H "$U" -X POST localhost:5080/v1/foundation/refresh   # 출처 갱신 (밖으로 나가는 유일한 호출)
+curl        localhost:5080/v1/foundation/reconcile   # 관측 ↔ 마스터 대사
+```
+
+출처는 무료 API와 MCP 서버다 — 사람이 손으로 심는 시드가 아니다. **기본은 전부 비활성**이라
+켜지 않으면 테스트도 CI도 네트워크로 나가지 않는다.
+
+```bash
+Foundation__ExchangeRate__Enabled=true      # open.er-api.com — 무료, 키 불필요
+Foundation__Holiday__ServiceKey=…           # 공공데이터포털 특일 정보 (무료, 키 필요)
+Foundation__BusinessStatus__ServiceKey=…    # 국세청 사업자등록 상태조회 (무료, 키 필요)
+Foundation__Mcp__0__Endpoint=https://…/mcp  # MCP 서버 (Streamable HTTP, JSON-RPC)
+Foundation__Mcp__0__Tool=list_vendors
+Foundation__Mcp__0__KeyArgument=names       # 주면 관측된 키만 물어본다 (조회형 출처)
+```
+
+대사 판정이 넷인 것이 핵심이다. 둘로 나누면 경보가 무의미해진다.
+
+| 판정 | 뜻 |
+|---|---|
+| `matched` | 마스터에 있다 |
+| `unmatched` | 마스터에 없다 — **이것만 경보다** |
+| `unverifiable` | 키 공간이 달라 물어볼 수 없다 (마스터는 사업자번호, 관측은 상호명) |
+| `no_master` | 이 종류의 출처가 아직 없다 |
+
+마스터가 없는데 미등록으로 세면 관측 전량이 경보가 되고, 그러면 사람이 경보를 보지 않게 된다.
+같은 이유로 조회 실패는 조용한 빈 목록이 아니라 오류로 남고, 실패한 갱신은 직전 사실을 지우지
+않는다. MCP·공개 API 응답은 외부 데이터라 **마스터 조회 키와 개수로만** 쓰이고 개념 문서나
+AI 프롬프트가 되지 않는다.
+
 - **개인 보정은 `personal:<user>` 스코프에만 적재**되고 캐스케이드에서 1순위로 적중한다 →
   같은 화면 재방문 시 AI를 호출하지 않는다. 다른 사용자에게는 영향이 없다.
 - 보정 개념은 **이름과 별칭 모두** 받는다(`단가` → `UnitPrice`). 온톨로지에 없는 개념은

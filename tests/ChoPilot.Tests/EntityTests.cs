@@ -132,7 +132,8 @@ public class ItemAxisAggregationTests
                 0.9, "ai"), K), user, "sig", T0);
 
     private static AxisAggregator Aggregator(EntityStore entities, KnowledgeStore knowledge) =>
-        new(new UnknownConceptLog(), new UepStore(), new SuggestionFeedbackStore(), knowledge, entities);
+        TestFoundation.Aggregator(new UnknownConceptLog(), new UepStore(),
+            new SuggestionFeedbackStore(), knowledge, entities);
 
     [Fact]
     public void CooccurrenceBecomesItemDraft_WhenBothGatesPass()

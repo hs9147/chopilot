@@ -31,17 +31,23 @@ public sealed class AxisAggregator
     public const int DefaultMinSupport = 3;
     public const int DefaultMinDistinctUsers = 2;
 
+    /// <summary>미등록 키를 본문에 이름으로 적는 최대 개수. 나머지는 개수로만 적는다.</summary>
+    public const int MaxNamedGaps = 20;
+
     private readonly UnknownConceptLog _unknownConcepts;
     private readonly UepStore _uep;
     private readonly SuggestionFeedbackStore _suggestions;
     private readonly KnowledgeStore _knowledge;
     private readonly EntityStore _entities;
+    private readonly FoundationStore _foundation;
+    private readonly FoundationReconciler _reconciler;
     private readonly int _minSupport;
     private readonly int _minDistinctUsers;
 
     public AxisAggregator(
         UnknownConceptLog unknownConcepts, UepStore uep,
         SuggestionFeedbackStore suggestions, KnowledgeStore knowledge, EntityStore entities,
+        FoundationStore foundation, FoundationReconciler reconciler,
         int minSupport = DefaultMinSupport, int minDistinctUsers = DefaultMinDistinctUsers)
     {
         _unknownConcepts = unknownConcepts;
@@ -49,6 +55,8 @@ public sealed class AxisAggregator
         _suggestions = suggestions;
         _knowledge = knowledge;
         _entities = entities;
+        _foundation = foundation;
+        _reconciler = reconciler;
         _minSupport = minSupport;
         _minDistinctUsers = minDistinctUsers;
     }
@@ -66,8 +74,110 @@ public sealed class AxisAggregator
         AggregateSharedTransitions(drafts, skipped, at);
         AggregateRejectedSuggestions(drafts, skipped, at);
         AggregateItemCharacteristics(drafts, skipped, at);
+        AggregateFoundationSources(drafts, skipped, at);
+        AggregateFoundationGaps(drafts, skipped, at);
 
         return new AggregationResult(drafts, skipped);
+    }
+
+    /// <summary>
+    /// 기반 출처 등록 초안 (기반 축). 어떤 무료 API·MCP 서버를 우리 기준정보의 권위로
+    /// 인정할 것인가 — 이건 관측이 아니라 <b>사람의 판단</b>이라 검수 큐를 거친다.
+    ///
+    /// <para>
+    /// <b>k인 게이트를 걸지 않는다.</b> 그 게이트는 한 사람의 활동이 org 문서로 새는 것을
+    /// 막는 장치인데, 이 문서에는 관측이 없다 — 엔드포인트·라이선스·건수뿐이다.
+    /// 게이트를 기계적으로 걸면 출처 등록이 영원히 통과하지 못한다.
+    /// </para>
+    /// <para>
+    /// 내장 출처는 초안이 되지 않는다. 승인이 묻는 것은 "이 <b>외부 당사자</b>를 믿는가"인데
+    /// 내장 표준은 우리가 배포한 코드라 물을 상대가 없다 — 검수 큐에 넣으면 잡음만 는다.
+    /// </para>
+    /// </summary>
+    private void AggregateFoundationSources(List<KnowledgeDoc> drafts, List<string> skipped, DateTimeOffset at)
+    {
+        foreach (var source in _foundation.Status())
+        {
+            var id = $"note.foundation.source.{Slug(source.Id)}";
+            if (!source.RequiresNetwork) continue;   // 내장 출처엔 승인할 외부 당사자가 없다
+            if (_knowledge.Get(id) is not null) { skipped.Add($"{id}: 이미 존재"); continue; }
+            if (source.Error is { } error) { skipped.Add($"{id}: 조회 실패 — {error}"); continue; }
+            if (source.Facts == 0) { skipped.Add($"{id}: 사실 0건 — 갱신 전이거나 응답이 비었다"); continue; }
+
+            var body = new StringBuilder()
+                .AppendLine($"**{source.Title}** 를 `{source.Kind}` 기반 정보의 출처로 등록한다.")
+                .AppendLine()
+                .AppendLine($"- 엔드포인트: `{source.Origin}`")
+                .AppendLine($"- 이용 조건: {source.License}")
+                .AppendLine($"- 현재 사실: {source.Facts}건")
+                .AppendLine($"- 마지막 갱신: {(source.FetchedAt is { } t ? t.ToString("yyyy-MM-dd HH:mm") : "내장(갱신 불필요)")}")
+                .AppendLine()
+                .AppendLine("승인은 \"이 출처를 우리 기준정보의 권위로 인정한다\"는 뜻이다. 확인할 것: 이용 조건이 사내 정책에 맞는가, 이 출처가 담당 업무의 관할과 일치하는가.")
+                .ToString();
+
+            drafts.Add(Draft(id, KnowledgeType.Note, $"기반 출처: {source.Title}", body, at,
+                new KnowledgeProvenance(new List<string> { $"foundation.source:{source.Id}" },
+                    source.Facts, 0, source.FetchedAt),
+                axis: KnowledgeAxis.Foundation));
+        }
+    }
+
+    /// <summary>
+    /// 대사 결핍 초안 (기반 축) — 관측됐지만 마스터에 없는 키.
+    ///
+    /// <para>
+    /// <b>미등록만 싣는다.</b> 마스터가 없거나(<c>no_master</c>) 키 공간이 어긋난 것
+    /// (<c>unverifiable</c>)은 결핍이 아니라 대사 자체가 성립하지 않은 것이라
+    /// 문서로 만들면 경보가 전량 거짓이 된다 — 그러면 사람이 경보를 보지 않게 된다.
+    /// </para>
+    /// <para>
+    /// 값(거래처·품목 키)이 본문에 실리므로 품목 축과 같은 게이트를 건다. 한 사람에게서만
+    /// 나온 미등록 키는 그 사람이 무엇을 다루는지 드러낸다 — 그건 레코드지 지식이 아니다.
+    /// </para>
+    /// </summary>
+    private void AggregateFoundationGaps(List<KnowledgeDoc> drafts, List<string> skipped, DateTimeOffset at)
+    {
+        var report = _reconciler.Reconcile();
+
+        foreach (var group in report.Rows
+                     .Where(r => r.Status == ReconcileStatus.Unmatched)
+                     .GroupBy(r => r.Kind, StringComparer.Ordinal))
+        {
+            var id = $"note.foundation.unmatched.{Slug(group.Key)}";
+            if (_knowledge.Get(id) is not null) { skipped.Add($"{id}: 이미 존재"); continue; }
+
+            var gaps = group
+                .Where(r => r.Mentions >= _minSupport && r.DistinctUsers >= _minDistinctUsers)
+                .OrderByDescending(r => r.Mentions)
+                .ToList();
+
+            if (gaps.Count == 0)
+            {
+                skipped.Add($"{id}: 게이트를 넘은 미등록 키가 없다 (지지도 {_minSupport}회 · {_minDistinctUsers}명)");
+                continue;
+            }
+
+            var body = new StringBuilder()
+                .AppendLine($"`{group.Key}` 마스터에 없는 값이 {gaps.Count}건 관측됐다.")
+                .AppendLine();
+
+            foreach (var gap in gaps.Take(MaxNamedGaps))
+                body.AppendLine($"- `{gap.Key}` — {gap.DistinctUsers}명 / {gap.Mentions}회 (마지막 {gap.LastSeen:yyyy-MM-dd})");
+
+            if (gaps.Count > MaxNamedGaps)
+                body.AppendLine($"- 외 {gaps.Count - MaxNamedGaps}건");
+
+            body.AppendLine()
+                .AppendLine("확인할 것: 마스터 등록이 누락된 것인가, 화면 표기가 마스터와 다른 것인가, 아니면 애초에 거래해서는 안 되는 값인가?")
+                .AppendLine("**이 목록은 마스터가 아니다** — 승인해도 기준정보가 되지 않고, 담당자가 확인할 대상으로만 남는다.");
+
+            drafts.Add(Draft(id, KnowledgeType.Note, $"기반 대사: {group.Key} 미등록 {gaps.Count}건",
+                body.ToString(), at,
+                new KnowledgeProvenance(new List<string> { "foundation.reconcile" },
+                    gaps.Sum(g => g.Mentions), gaps.Max(g => g.DistinctUsers),
+                    gaps.Max(g => g.LastSeen)),
+                axis: KnowledgeAxis.Foundation));
+        }
     }
 
     /// <summary>

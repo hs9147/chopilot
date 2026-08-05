@@ -50,6 +50,8 @@
 | `KnowledgeStore` | Plane 3 지식 문서 저장·수명주기(제출→승인→게시→폐기) + 컴파일(온톨로지·Guide 규칙·업무객체 힌트). 온톨로지는 이제 코드가 아니라 여기서 나온다 |
 | `AxisAggregator` | 4축 신호 집계 → 지식 초안 생성 (Phase 2 — 스키마만 선반영) |
 | `KnowledgeEditor` | LLM이 집계를 문서 초안으로 서술 (Phase 2 — 일 배치) |
+| `FoundationStore` | 무료 API·MCP 출처의 기준정보 사실을 하나의 마스터로 병합 (등록 순서 = 우선순위) |
+| `FoundationReconciler` | 관측 엔티티 ↔ 마스터 대사. 미등록 / 대사 불가 / 마스터 없음을 구분 |
 
 ---
 
@@ -184,6 +186,9 @@ POST /v1/knowledge/{id}/deprecate  # 폐기 (개념이면 해당 매핑 필드 �
 | domain | 보정에서 거부된 미지 개념 | `concept.{용어}` — **민감으로 제안**(모르면 닫는다), 승인자가 내린다 |
 | domain | 여러 사용자의 공통 화면 전이 | `note.flow.{from}--{to}` — **route만** 싣는다 |
 | domain | 여러 사용자가 반복 거부한 제안 | `note.rejected.{bo}.{concept}` — 규칙 재검토 |
+| item | 엔티티 공동 출현(품목↔거래처) | `note.item.{품목}` — 값이 실리는 축, 게이트가 곧 프라이버시 경계 |
+| foundation | 무료 API·MCP 출처 등록 | `note.foundation.source.{출처}` — 관측이 없어 k인 게이트 없음 |
+| foundation | 마스터에 없는 관측 키 | `note.foundation.unmatched.{종류}` — 승인해도 마스터가 되지 않는다 |
 | user | UEP + 제안 판단 | `view.user.{id}` — **저장하지 않고 요청 시 렌더**(파생물) |
 
 두 게이트가 항상 걸린다: **지지도**(`Knowledge:MinSupport`, 기본 3)와 **k인**(`Knowledge:MinDistinctUsers`,
@@ -202,6 +207,38 @@ Bedrock을 호출해 **본문 서술만** 다듬는다. 반환값이 문자열 �
 "누가 이 페이지의 진실을 소유하는가"가 무너진다. 편집·승인 대상이 아니며(`kind=view`) 컴파일에도
 참여하지 않는다. 개인 뷰에는 화면 **제목**이 실리지만(본인만 조회, D5), org 초안에는 **route**만
 실린다 — 제목에는 레코드 식별자가 섞일 수 있기 때문이다.
+
+### 4.7 기반 정보 축 — 무료 API·MCP 출처와 대사
+
+계보와 설계 근거는 [ARCHITECTURE.md](ARCHITECTURE.md) §5.6. 여기서는 운영 인터페이스만 적는다.
+
+| 엔드포인트 | 하는 일 |
+|---|---|
+| `GET /v1/foundation` | 마스터 요약(종류별 건수) + 출처별 상태·라이선스·마지막 갱신·오류 |
+| `POST /v1/foundation/refresh` | 모든 출처 갱신. **유일하게 밖으로 나가는 호출**이라 사용자 헤더를 요구하고 `DecisionLog`에 남긴다 |
+| `GET /v1/foundation/reconcile` | 관측 ↔ 마스터 대사 결과 (matched / unmatched / unverifiable / no_master) |
+
+**설정 (기본은 전부 비활성).** 키를 채우거나 `Enabled`를 켜야 출처가 등록된다 — 켜지 않으면
+테스트도 CI도 네트워크로 나가지 않는다. 서비스 키는 소스에 커밋하지 말고 환경변수로 넣는다:
+
+```
+Foundation__ExchangeRate__Enabled=true          # 키 불필요
+Foundation__Holiday__ServiceKey=…               # 공공데이터포털
+Foundation__BusinessStatus__ServiceKey=…        # 국세청
+Foundation__Mcp__0__Endpoint=https://…/mcp      # MCP 서버 (Streamable HTTP)
+Foundation__Mcp__0__Tool=list_vendors
+Foundation__Mcp__0__Kind=Company
+Foundation__Mcp__0__KeyArgument=names           # 주면 조회형: 관측된 키만 물어본다
+```
+
+MCP 클라이언트는 `initialize` → `notifications/initialized` → `tools/call` 세 번의 JSON-RPC로
+끝나는 최소 구현이다. 공식 SDK를 끌어오지 않은 것은 의도다 — 이 경로에 필요한 건 도구 호출
+하나뿐이고, 서버 프로젝트에 프리뷰 의존성을 추가하면 CI가 패키지 복원에 묶인다. 도구 결과는
+`structuredContent`가 있으면 그쪽을, 없으면 텍스트 콘텐츠의 JSON을 쓴다(배열 또는
+`facts`/`items`/`data`/`results`). 해석할 수 없으면 **빈 목록이 아니라 오류**다.
+
+**서비스 키는 노출되지 않는다.** `Origin`은 호스트까지만 적고(지식 문서 본문에 그대로 실린다),
+오류 메시지의 응답 본문은 200자로 자른다.
 
 ---
 

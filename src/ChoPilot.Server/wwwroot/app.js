@@ -34,6 +34,8 @@ const state = {
   knowledgeVersion: 0,
   signals: null,          // 미지 개념 후보
   entities: null,         // 엔티티 결정 결과(H5)
+  foundation: null,       // 기반 출처 상태 + 마스터 요약
+  reconcile: null,        // 관측 ↔ 마스터 대사 결과
   myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
   openDraft: null,
 };
@@ -147,10 +149,11 @@ const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor 
 async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
-           knowledge, signals, entities] = await Promise.all([
+           knowledge, signals, entities, foundation, reconcile] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
+      api('/v1/foundation'), api('/v1/foundation/reconcile'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -164,6 +167,8 @@ async function refreshAll() {
     state.knowledgeVersion = knowledge.version;
     state.signals = signals;
     state.entities = entities;
+    state.foundation = foundation;
+    state.reconcile = reconcile;
     state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
@@ -177,6 +182,7 @@ async function refreshAll() {
   renderReview();
   renderDecisions();
   renderKnowledge();
+  renderFoundation();
   renderObservations();
   renderVerdict();
   if (state.selected) await selectObservation(state.selected);
@@ -549,6 +555,116 @@ async function aggregate(dryRun) {
   }
 }
 
+/* ── 기반 정보 (무료 API · MCP) ───────────────────────── */
+
+// 판정을 색으로 가른다. unmatched만 붉다 — no_master·unverifiable을 경보로 칠하면
+// 출처를 붙이기 전까지 화면이 온통 빨개지고, 그러면 사람이 경보를 보지 않게 된다.
+const RECONCILE_VERDICT = {
+  matched: ['pill-pass', '마스터에 있음'],
+  unmatched: ['pill-fail', '미등록'],
+  unverifiable: ['pill-warn', '대사 불가'],
+  no_master: ['pill-muted', '마스터 없음'],
+};
+
+function renderFoundation() {
+  renderFoundationSources();
+  renderReconcile();
+}
+
+function renderFoundationSources() {
+  const box = $('foundationSources');
+  const f = state.foundation;
+  if (!f) {
+    box.innerHTML = '<p class="empty">데이터 없음</p>';
+    return;
+  }
+
+  const kinds = f.master.kinds.length
+    ? f.master.kinds.map((k) => `${esc(k.kind)} ${k.count}건`).join(' · ')
+    : '없음';
+
+  const rows = f.sources.map((s) => `<tr class="${s.error ? 'row-split' : ''}">
+    <td>${esc(s.title)}</td>
+    <td class="mono">${esc(s.kind)}</td>
+    <td class="mono">${esc(s.origin)}</td>
+    <td class="num">${s.facts}</td>
+    <td class="hint">${esc(s.license)}</td>
+    <td>${s.error
+      ? `<span class="pill pill-fail">${esc(s.error)}</span>`
+      : !s.requiresNetwork
+        ? '<span class="pill pill-muted">내장</span>'
+        : s.fetchedAt
+          ? `<span class="pill pill-pass">${esc(s.fetchedAt.slice(0, 16).replace('T', ' '))}</span>`
+          : '<span class="pill pill-warn">갱신 전</span>'}</td>
+  </tr>`).join('');
+
+  box.innerHTML = `<p class="hint">마스터 <strong>${f.master.count}건</strong> — ${kinds}</p>
+    <table>
+      <thead><tr><th>출처</th><th>종류</th><th>엔드포인트</th><th class="num">사실</th>
+                 <th>이용 조건</th><th>상태</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderReconcile() {
+  const box = $('foundationReconcile');
+  const r = state.reconcile;
+  if (!r || r.checked === 0) {
+    box.innerHTML = '<p class="empty">대사할 관측 엔티티 없음 — 스냅샷을 먼저 적재하라</p>';
+    return;
+  }
+
+  const rows = r.rows.map((row) => {
+    const [cls, label] = RECONCILE_VERDICT[row.status] || ['pill-muted', row.status];
+    return `<tr>
+      <td class="mono">${esc(row.kind)}</td>
+      <td class="mono">${esc(row.key)}</td>
+      <td class="num">${row.distinctUsers}</td>
+      <td class="num">${row.mentions}</td>
+      <td><span class="pill ${cls}">${esc(label)}</span></td>
+      <td class="hint">${esc(row.detail || '')}</td>
+    </tr>`;
+  }).join('');
+
+  box.innerHTML = `<div class="metrics">
+      ${metricCard('대사 대상', r.checked, '관측 엔티티', null)}
+      ${metricCard('일치', r.matched, '마스터에 있음', null)}
+      ${metricCard('미등록', r.unmatched, '0건이 목표', r.unmatched === 0)}
+      ${metricCard('대사 불가', r.unverifiable + r.noMaster, '출처·키 공간 문제', null)}
+    </div>
+    <div class="table-scroll"><table>
+      <thead><tr><th>종류</th><th>키</th><th class="num">사람</th><th class="num">관측</th>
+                 <th>판정</th><th>비고</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`
+    + (r.notes.length ? `<p class="warn">${r.notes.map(esc).join('<br>')}</p>` : '');
+}
+
+async function refreshFoundation() {
+  const msg = $('foundationMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  msg.className = 'hint';
+  msg.textContent = '갱신 중…';
+
+  try {
+    const result = await api('/v1/foundation/refresh', {
+      method: 'POST',
+      headers: { 'X-ChoPilot-User': actor },
+    });
+    msg.className = result.failures.length ? 'warn' : 'hint';
+    msg.textContent = `출처 ${result.refreshed}개 · 사실 ${result.facts}건`
+      + (result.failures.length
+        ? ` · 실패 ${result.failures.length}건 (${result.failures[0].source}: ${result.failures[0].error})`
+        : '');
+    await refreshAll();
+  } catch (err) {
+    msg.className = 'warn';
+    msg.textContent = `갱신 실패: ${err.message}`;
+  }
+}
+
 function renderDecisions() {
   const box = $('decisions');
   if (state.decisions.length === 0) {
@@ -878,6 +994,25 @@ function buildMarkdown() {
          '', '> 자동 병합하지 않는다 — 잘못 합치면 서로 다른 실체가 하나가 되고 오류가 전파된다.']
       : []),
     '',
+    '## 기반 정보 (무료 API · MCP)',
+    '',
+    state.foundation
+      ? `- 출처 ${state.foundation.sources.length}개 · 마스터 ${state.foundation.master.count}건`
+        + ` (${state.foundation.master.kinds.map((k) => `${k.kind} ${k.count}`).join(', ') || '없음'})`
+      : '- 미측정',
+    ...(state.foundation && state.foundation.sources.length
+      ? ['', '| 출처 | 종류 | 엔드포인트 | 사실 | 상태 |', '|------|------|------------|------|------|',
+         ...state.foundation.sources.map((s) =>
+           `| ${s.title} | ${s.kind} | \`${s.origin}\` | ${s.facts} | ${s.error || (s.requiresNetwork ? '정상' : '내장')} |`)]
+      : []),
+    ...(state.reconcile && state.reconcile.checked
+      ? ['',
+         `- 대사 ${state.reconcile.checked}건 — 일치 ${state.reconcile.matched} / **미등록 ${state.reconcile.unmatched}**`
+         + ` / 대사 불가 ${state.reconcile.unverifiable} / 마스터 없음 ${state.reconcile.noMaster}`,
+         '- 미등록만 경보다. 마스터가 없거나 키 공간이 어긋난 것은 대사가 성립하지 않은 것이라 결핍이 아니다.',
+         ...state.reconcile.notes.map((n) => `- ${n}`)]
+      : ['- 대사할 관측 엔티티가 없다.']),
+    '',
     '## 제안 수락률 (ARCHITECTURE §9)',
     '',
     state.suggestions && state.suggestions.impressions
@@ -921,6 +1056,7 @@ function bind() {
 
   $('aggregatePreview').addEventListener('click', () => aggregate(true));
   $('aggregateSubmit').addEventListener('click', () => aggregate(false));
+  $('foundationRefresh').addEventListener('click', refreshFoundation);
 
   for (const key of ['h1Total', 'h1Ok', 'h3Total', 'h3Ai', 'h3Base']) {
     const input = $(key);
@@ -950,6 +1086,8 @@ function bind() {
       knowledge: state.knowledge,
       signals: state.signals,
       entities: state.entities,
+      foundation: state.foundation,
+      reconcile: state.reconcile,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

@@ -31,12 +31,57 @@ builder.Services.AddSingleton<KnowledgeStore>();
 builder.Services.AddSingleton<UnknownConceptLog>();
 builder.Services.AddSingleton<EntityStore>();
 builder.Services.AddSingleton<KnowledgeViewRenderer>();
+
+// ── 기반 정보 축 출처 (무료 API · MCP) ──────────────────────────────────────
+// 등록 순서가 병합 우선순위다: 뒤에 등록된 출처가 앞을 덮는다.
+// 내장 표준 → 키 없는 무료 API → 공공데이터포털(키 필요) → 조직이 지정한 MCP 서버.
+// 네트워크 출처는 <b>기본 전부 비활성</b>이다 — 켜지 않으면 테스트도 CI도 밖으로 나가지 않는다.
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IFoundationSource, EmbeddedFoundationSource>();
+
+if (cfg.GetValue<bool>("Foundation:ExchangeRate:Enabled"))
+    builder.Services.AddSingleton<IFoundationSource>(sp => new ExchangeRateSource(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("foundation"),
+        cfg["Foundation:ExchangeRate:Base"] ?? "KRW"));
+
+if (cfg["Foundation:Holiday:ServiceKey"] is { Length: > 0 } holidayKey)
+    builder.Services.AddSingleton<IFoundationSource>(sp => new PublicHolidaySource(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("foundation"),
+        holidayKey, cfg.GetValue<int?>("Foundation:Holiday:YearsAhead") ?? 1));
+
+if (cfg["Foundation:BusinessStatus:ServiceKey"] is { Length: > 0 } bizKey)
+    builder.Services.AddSingleton<IFoundationSource>(sp => new BusinessStatusSource(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("foundation"), bizKey));
+
+foreach (var mcp in cfg.GetSection("Foundation:Mcp").GetChildren())
+{
+    if (mcp["Endpoint"] is not { Length: > 0 } endpoint || mcp["Tool"] is not { Length: > 0 } tool) continue;
+
+    var options = new McpSourceOptions
+    {
+        Endpoint = endpoint,
+        Tool = tool,
+        Kind = mcp["Kind"] ?? FoundationKind.Company,
+        BearerToken = mcp["BearerToken"],
+        Arguments = mcp["Arguments"],
+        KeyArgument = mcp["KeyArgument"],
+        License = mcp["License"],
+    };
+    builder.Services.AddSingleton<IFoundationSource>(sp => new McpFoundationSource(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("foundation"), options));
+}
+
+builder.Services.AddSingleton(sp => new FoundationStore(sp.GetServices<IFoundationSource>()));
+builder.Services.AddSingleton<FoundationReconciler>();
+
 builder.Services.AddSingleton(sp => new AxisAggregator(
     sp.GetRequiredService<UnknownConceptLog>(),
     sp.GetRequiredService<UepStore>(),
     sp.GetRequiredService<SuggestionFeedbackStore>(),
     sp.GetRequiredService<KnowledgeStore>(),
     sp.GetRequiredService<EntityStore>(),
+    sp.GetRequiredService<FoundationStore>(),
+    sp.GetRequiredService<FoundationReconciler>(),
     cfg.GetValue<int?>("Knowledge:MinSupport") ?? AxisAggregator.DefaultMinSupport,
     cfg.GetValue<int?>("Knowledge:MinDistinctUsers") ?? AxisAggregator.DefaultMinDistinctUsers));
 builder.Services.AddSingleton<IKnowledgeProvider>(sp => sp.GetRequiredService<KnowledgeStore>());
@@ -199,6 +244,52 @@ app.MapGet("/v1/entities", (EntityStore entities) =>
         splits,
     });
 });
+
+// ── 기반 정보 축 (ARCHITECTURE §5.4 4축) ────────────────────────────────────
+// 다른 축과 반대 방향이다: 관측이 지식을 만드는 게 아니라, 외부 출처가 마스터를 주고
+// 관측이 그것에 대사된다. 관측을 마스터로 승격하는 경로는 없다.
+
+app.MapGet("/v1/foundation", (FoundationStore foundation) =>
+{
+    var master = foundation.Master;
+    return Results.Ok(new
+    {
+        master = new
+        {
+            count = master.Count,
+            kinds = master.Kinds.Select(k => new { kind = k, count = master.CountOf(k) }),
+        },
+        sources = foundation.Status(),
+    });
+});
+
+// 출처 갱신 — 유일하게 밖으로 나가는 호출이라 사용자를 요구하고 결정 이력에 남긴다.
+// 관측된 키를 질의로 함께 넘긴다: 전량 덤프가 없는 무료 API는 "우리가 본 것"만 물어볼 수 있다.
+app.MapPost("/v1/foundation/refresh",
+    async (HttpRequest request, FoundationStore foundation, EntityStore entities,
+           DecisionLog decisions, CancellationToken ct) =>
+{
+    if (RequestUser.From(request) is not { } actor)
+        return Results.BadRequest(new { error = $"missing {RequestUser.Header} header" });
+
+    var results = await foundation.RefreshAsync(FoundationStore.QueryFrom(entities), ct);
+    var failed = results.Where(r => !r.Ok).ToList();
+
+    decisions.Record("foundation_refresh", actor, "foundation", "global", 1.0,
+        $"{results.Count}개 출처, 사실 {foundation.Master.Count}건, 실패 {failed.Count}건");
+
+    return Results.Ok(new
+    {
+        refreshed = results.Count,
+        facts = foundation.Master.Count,
+        failures = failed.Select(f => new { source = f.SourceId, error = f.Error }),
+        sources = foundation.Status(),
+    });
+});
+
+// 관측 ↔ 마스터 대사. unmatched만 경보다 — no_master·unverifiable은 대사가 성립하지 않은 것이다.
+app.MapGet("/v1/foundation/reconcile", (FoundationReconciler reconciler) =>
+    Results.Ok(reconciler.Reconcile()));
 
 // route별 서명 그룹핑 — 같은 화면이 여러 서명으로 갈렸는지가 캐시 적중률 미달의 1차 원인.
 app.MapGet("/v1/signatures", (ObservationStore store) =>
