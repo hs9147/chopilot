@@ -108,8 +108,9 @@ public class ObservationDispatcherTests
         try
         {
             var spool = new EventSpool(dir);
-            var result = await ObservationDispatcher.DispatchAsync(
-                spool, TestEvents.Evt(), _ => throw new HttpRequestException("down"));
+            // throw 본문 람다는 반환 타입을 추론할 수 없어 오버로드가 갈리지 않는다 — 명시한다.
+            Func<ObservationEvent, Task<SendOutcome>> boom = _ => throw new HttpRequestException("down");
+            var result = await ObservationDispatcher.DispatchAsync(spool, TestEvents.Evt(), boom);
 
             Assert.False(result.Sent);
             Assert.Equal(1, spool.PendingCount);

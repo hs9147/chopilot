@@ -42,6 +42,23 @@ public sealed class Uploader : IDisposable
     public async Task<bool> TryPostObservationAsync(ObservationEvent evt, CancellationToken ct = default) =>
         (await PostObservationAsync(evt, ct)).Success;
 
+    /// <summary>
+    /// 스풀 재전송용 어댑터 — 재시도 가능한 실패와 <b>영구 거부</b>를 구분한다.
+    /// 전송 경로는 이쪽을 써야 한다: 거부를 재시도로 보면 큐 머리가 막힌다.
+    /// </summary>
+    public async Task<SendOutcome> SendObservationAsync(ObservationEvent evt, CancellationToken ct = default) =>
+        Classify(await PostObservationAsync(evt, ct));
+
+    /// <summary>
+    /// 4xx는 같은 이벤트를 다시 보내도 결과가 같다 — 계약 위반이지 서버 장애가 아니다.
+    /// 408(타임아웃)·429(요청 과다)만 예외: 시간이 지나면 성공할 수 있다.
+    /// 상태 코드가 없으면(네트워크 예외) 재시도다.
+    /// </summary>
+    public static SendOutcome Classify(ServerResponse response) =>
+        response.Success ? SendOutcome.Sent
+        : response.StatusCode is >= 400 and < 500 and not 408 and not 429 ? SendOutcome.Rejected
+        : SendOutcome.Retry;
+
     public Task<ServerResponse> GetGuideAsync(string observationId, CancellationToken ct = default) =>
         SendAsync(() => _http.GetAsync($"/v1/guide?observation_id={Uri.EscapeDataString(observationId)}", ct), ct);
 

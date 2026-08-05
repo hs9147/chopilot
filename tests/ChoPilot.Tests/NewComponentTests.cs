@@ -116,9 +116,9 @@ public class EventSpoolTests
             Assert.Equal(3, spool.PendingCount);
 
             var order = new List<string>();
-            var sent = await spool.DrainAsync(e => { order.Add(e.EventId); return Task.FromResult(true); });
+            var drain = await spool.DrainAsync(e => { order.Add(e.EventId); return Task.FromResult(true); });
 
-            Assert.Equal(3, sent);
+            Assert.Equal(3, drain.Sent);
             Assert.Equal(new[] { "a", "b", "c" }, order);   // FIFO(오래된 순)
             Assert.Equal(0, spool.PendingCount);
         }
@@ -138,9 +138,9 @@ public class EventSpoolTests
 
             // 첫 건만 성공, 두 번째부터 실패
             var count = 0;
-            var sent = await spool.DrainAsync(_ => Task.FromResult(count++ == 0));
+            var drain = await spool.DrainAsync(_ => Task.FromResult(count++ == 0));
 
-            Assert.Equal(1, sent);
+            Assert.Equal(1, drain.Sent);
             Assert.Equal(1, spool.PendingCount);            // 실패분은 남아 재시도 대상
         }
         finally { Directory.Delete(dir, recursive: true); }

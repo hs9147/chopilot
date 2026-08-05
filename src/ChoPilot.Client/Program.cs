@@ -75,14 +75,19 @@ if (opts.Upload)
     Console.Error.WriteLine($"[chopilot-dump] upload → {url} (spool: {spoolDir}, 대기 {spool.PendingCount})");
     using var uploader = new Uploader(url);
 
-    // 밀린 스풀 재전송 → 현재 이벤트 전송. 실패분은 유실 대신 스풀에 남는다.
+    // 밀린 스풀 재전송 → 현재 이벤트 전송.
+    // 재시도 가능한 실패는 유실 대신 스풀에 남고, 서버가 영구히 거부한 것(4xx)은 격리된다 —
+    // 거부를 남기면 큐 머리를 막아 그 뒤의 모든 관측이 서버에 도달하지 못한다.
     var dispatch = await ObservationDispatcher.DispatchAsync(
-        spool, evt, e => uploader.TryPostObservationAsync(e));
+        spool, evt, e => uploader.SendObservationAsync(e));
 
     if (dispatch.Drained > 0) Console.Error.WriteLine($"[chopilot-dump] spool 재전송 {dispatch.Drained}건");
+    if (dispatch.Rejected > 0) Console.Error.WriteLine($"[chopilot-dump] spool 격리 {dispatch.Rejected}건 (서버가 거부 — *.bad)");
 
     if (dispatch.Sent)
         Console.Error.WriteLine("[chopilot-dump] guide : " + await uploader.GetGuideAsync(evt.EventId));
+    else if (dispatch.Outcome == SendOutcome.Rejected)
+        Console.Error.WriteLine("[chopilot-dump] 서버가 이 이벤트를 거부했다 — 스풀에 넣지 않는다(재시도해도 같다)");
     else
         Console.Error.WriteLine($"[chopilot-dump] 전송 실패 → 스풀 적재(대기 {dispatch.Pending})");
 }

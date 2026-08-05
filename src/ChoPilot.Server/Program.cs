@@ -140,10 +140,15 @@ app.UseStaticFiles();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapPost("/v1/observations",
-    async (ObservationEvent evt, MappingResolver resolver, ObservationStore store,
+    async (ObservationEvent? evt, MappingResolver resolver, ObservationStore store,
            AuditService audit, UepStore uep, IKnowledgeProvider knowledgeProvider,
            EntityStore entities) =>
 {
+    // 계약 위반은 장애가 아니라 거부다. 500을 내면 클라이언트 스풀이 그것을 서버 장애로 읽고
+    // 순서 보존을 위해 큐 머리에 남긴다 — 그 뒤의 모든 관측이 영원히 도달하지 못한다.
+    if (!ObservationContract.IsValid(evt, out var violation))
+        return Results.BadRequest(new { error = "invalid observation event", detail = violation });
+
     // 서명→매핑→BO 구간을 계측한다. 캐시 미스(=Bedrock 호출)와 HIT의 차이가 여기서 드러난다.
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
 
