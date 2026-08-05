@@ -13,6 +13,7 @@
     <p class="sub">Phase 0 위험 검증 — 스냅샷 재생으로 H1~H6를 측정한다</p>
   </div>
   <div class="topbar-right">
+    <span id="storage" class="pill pill-muted">저장소 확인 중…</span>
     <span id="health" class="pill pill-muted">서버 확인 중…</span>
     <button id="refresh" class="btn">새로고침</button>
   </div>
@@ -179,9 +180,7 @@
       <button id="exportJson" class="btn">원자료 내려받기 (JSON)</button>
       <button id="resetScoring" class="btn btn-ghost">채점 초기화</button>
     </div>
-    <p class="hint">
-      서버 저장소는 인메모리다 — <strong>재시작하면 지표가 사라진다.</strong> 세션을 끝내기 전에 내려받아라.
-    </p>
+    <p id="storageNote" class="hint"></p>
   </section>
 </main>
 

@@ -1,7 +1,8 @@
 'use strict';
 
 // Cho-Pilot 측정 콘솔 — PHASE0-MEASUREMENT.md의 jq/curl 절차를 화면으로 대체한다.
-// 서버 저장소가 인메모리라 지표는 서버 수명과 함께 사라진다. 채점만 localStorage에 남긴다.
+// 서버 저장소는 Storage:Path를 주면 저널로 남고, 없으면 서버 수명과 함께 사라진다(상단 배지).
+// 수기 채점은 어느 쪽이든 브라우저 localStorage에 남는다 — 서버가 모르는 값이다.
 
 const PASS = {
   h1: 0.90,   // 필드 획득률
@@ -35,6 +36,7 @@ const state = {
   signals: null,          // 미지 개념 후보
   entities: null,         // 엔티티 결정 결과(H5)
   completions: null,      // 작업 완료 신호 집계(필수 필드 규칙의 증거)
+  storage: null,          // 영속화 상태 — durable=false면 재시작에 전부 사라진다
   foundation: null,       // 기반 출처 상태 + 마스터 요약
   reconcile: null,        // 관측 ↔ 마스터 대사 결과
   myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
@@ -150,11 +152,12 @@ const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor 
 async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
-           knowledge, signals, entities, foundation, reconcile, completions] = await Promise.all([
+           knowledge, signals, entities, foundation, reconcile, completions, storage] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
       api('/v1/foundation'), api('/v1/foundation/reconcile'), api('/v1/completions?limit=1'),
+      api('/v1/storage'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -171,6 +174,7 @@ async function refreshAll() {
     state.foundation = foundation;
     state.reconcile = reconcile;
     state.completions = completions;
+    state.storage = storage;
     state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
@@ -184,6 +188,7 @@ async function refreshAll() {
   renderReview();
   renderDecisions();
   renderKnowledge();
+  renderStorage();
   renderFoundation();
   renderObservations();
   renderVerdict();
@@ -556,6 +561,45 @@ async function aggregate(dryRun) {
     msg.className = 'warn';
     msg.textContent = `집계 실패: ${err.message}`;
   }
+}
+
+/* ── 영속화 ───────────────────────────────────────────── */
+
+// 재시작에 무엇이 남는지는 측정 세션을 시작하기 전에 알아야 한다 — 끝난 뒤에 알면 늦다.
+function renderStorage() {
+  const pill = $('storage');
+  const note = $('storageNote');
+  const s = state.storage;
+
+  if (!s) {
+    pill.className = 'pill pill-muted';
+    pill.textContent = '저장소 —';
+    note.className = 'hint';
+    note.textContent = '';
+    return;
+  }
+
+  if (!s.durable) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = '인메모리';
+    note.className = 'warn';
+    note.innerHTML = '서버 저장소가 <strong>인메모리</strong>다 — 재시작하면 지식·매핑 캐시·감사 로그가 함께 사라진다. '
+      + '<code>Storage:Path</code>(또는 <code>Storage__Path</code>)를 주면 저널로 남는다. '
+      + '그때까지는 세션을 끝내기 전에 내려받아라.';
+    return;
+  }
+
+  pill.className = s.corrupt > 0 ? 'pill pill-warn' : 'pill pill-pass';
+  pill.textContent = s.corrupt > 0 ? `저장소 · 손상 ${s.corrupt}줄` : '저장소 durable';
+
+  const detail = s.journals.filter((j) => j.restored > 0)
+    .map((j) => `${esc(j.name)} ${j.restored}`).join(' · ') || '없음';
+
+  note.className = s.corrupt > 0 ? 'warn' : 'hint';
+  note.innerHTML = `저널 <code>${esc(s.path)}</code> — 부팅 시 <strong>${s.restored}건</strong> 복원 (${detail}).`
+    + (s.corrupt > 0
+      ? ` <strong>${s.corrupt}줄을 건너뛰었다</strong> — 쓰기 도중 종료된 흔적이다.`
+      : ' 재시작해도 남는다.');
 }
 
 /* ── 완료 신호 (필수 필드 규칙의 증거) ────────────────── */
@@ -1042,6 +1086,13 @@ function buildMarkdown() {
          '', '> 자동 병합하지 않는다 — 잘못 합치면 서로 다른 실체가 하나가 되고 오류가 전파된다.']
       : []),
     '',
+    '## 영속화',
+    '',
+    state.storage && state.storage.durable
+      ? `- 저널 \`${state.storage.path}\` — 부팅 시 ${state.storage.restored}건 복원`
+        + (state.storage.corrupt ? `, **손상 ${state.storage.corrupt}줄 폐기**` : '')
+      : '- **인메모리.** 이 리포트의 수치는 서버 재시작과 함께 사라진다.',
+    '',
     '## 작업 완료 신호 (ARCHITECTURE §11)',
     '',
     state.completions && state.completions.count
@@ -1151,6 +1202,7 @@ function bind() {
       foundation: state.foundation,
       reconcile: state.reconcile,
       completions: state.completions,
+      storage: state.storage,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

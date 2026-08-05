@@ -51,7 +51,22 @@ public sealed record MetricsSnapshot(
 public sealed class AuditService
 {
     private readonly ConcurrentQueue<AuditEntry> _log = new();
+    private readonly IJournal<AuditEntry> _journal;
     private long _seq;
+
+    public AuditService(IJournalFactory? journals = null)
+    {
+        _journal = (journals ?? NullJournalFactory.Instance).Open<AuditEntry>("audit");
+        foreach (var entry in _journal.Load())
+        {
+            _log.Enqueue(entry);
+            // 재시작 후 Seq가 다시 1부터 시작하면 감사 로그의 순서가 뒤엉킨다.
+            if (entry.Seq > _seq) _seq = entry.Seq;
+        }
+    }
+
+    /// <summary>복원 중 건너뛴 손상 줄 수 (부팅 로그용).</summary>
+    public int CorruptOnLoad => _journal.Corrupt;
 
     public AuditEntry Record(
         ObservationEvent evt, string signature, MappingResolver.ResolveResult result, double durationMs)
@@ -75,6 +90,7 @@ public sealed class AuditService
             OutputTokens: result.OutputTokens,
             Source: result.Source);
         _log.Enqueue(e);
+        _journal.Append(e);
         return e;
     }
 

@@ -4,6 +4,14 @@ using ChoPilot.Core;
 namespace ChoPilot.Server;
 
 /// <summary>
+/// 방문 1회의 원자료. UEP의 상태(빈도·최근성·전이)는 이 입력들의 <b>접기 결과</b>라
+/// 접힌 결과가 아니라 입력을 남긴다 — 접는 규칙(세션 단절 기준 등)이 바뀌어도
+/// 예전 관측이 새 규칙으로 다시 접힌다.
+/// </summary>
+public sealed record UepVisit(
+    string UserId, string Signature, DateTimeOffset At, string? Route, string? Title);
+
+/// <summary>
 /// User Environment Profile 저장소 (ARCHITECTURE §5.4 Personal Plane, PHASE1-DESIGN §5).
 /// 관측마다 (user_id, signature) 방문을 누적 → 사용 빈도·최근성, 그리고 <b>화면 전이</b>.
 /// 사용자별 격리. PoC는 인메모리. 운영은 Aurora/별도 스토어(ARCHITECTURE §11).
@@ -26,10 +34,20 @@ public sealed class UepStore
 
     private readonly TimeSpan _sessionGap;
     private readonly ConcurrentDictionary<string, UserState> _byUser = new();
+    private readonly IJournal<UepVisit> _journal;
 
     public UepStore() : this(DefaultSessionGap) { }
 
-    public UepStore(TimeSpan sessionGap) => _sessionGap = sessionGap;
+    public UepStore(TimeSpan sessionGap, IJournalFactory? journals = null)
+    {
+        _sessionGap = sessionGap;
+        _journal = (journals ?? NullJournalFactory.Instance).Open<UepVisit>("uep");
+
+        // 저널은 시간순이다(추가 전용). 전이는 직전 화면에 의존하므로 순서가 곧 정확성이다.
+        foreach (var visit in _journal.Load()) Apply(visit);
+    }
+
+    public UepStore(IJournalFactory? journals) : this(DefaultSessionGap, journals) { }
 
     /// <summary>
     /// 화면 방문 1회 기록. FirstSeen 보존, Count 증가, LastSeen 갱신,
@@ -42,6 +60,15 @@ public sealed class UepStore
     public void RecordVisit(
         string userId, string signature, DateTimeOffset at, string? route = null, string? title = null)
     {
+        var visit = new UepVisit(userId, signature, at, route, title);
+        Apply(visit);
+        _journal.Append(visit);
+    }
+
+    /// <summary>접기 1회. 복원 경로가 저널에 다시 쓰지 않도록 기록과 분리돼 있다.</summary>
+    private void Apply(UepVisit visit)
+    {
+        var (userId, signature, at, route, title) = visit;
         var state = _byUser.GetOrAdd(userId, _ => new UserState());
 
         // 방문 누적과 전이 기록은 "직전 화면"을 함께 읽고 쓴다 → 사용자 단위 직렬화.

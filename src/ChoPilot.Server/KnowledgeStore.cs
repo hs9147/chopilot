@@ -3,6 +3,17 @@ using ChoPilot.Core;
 namespace ChoPilot.Server;
 
 /// <summary>
+/// 지식 문서 1건의 상태 전이. 여기만 <b>연산</b>을 남기고 다른 저장소는 레코드를 남긴다 —
+/// 승인·폐기는 대기본을 <b>지우는</b> 부수효과가 있어서 문서만 봐서는 복원할 수 없다.
+/// </summary>
+public sealed record KnowledgeChange(string Op, KnowledgeDoc Doc)
+{
+    public const string Submitted = "submit";
+    public const string Approved = "approve";
+    public const string Deprecated = "deprecate";
+}
+
+/// <summary>
 /// Curated Knowledge Plane 저장소 (ARCHITECTURE §5.4 Plane 3, §5.5).
 /// 문서 수명주기: 제출(pending) → 승인(published) → 폐기(deprecated). <b>삭제는 없다.</b>
 /// 게시·폐기마다 지식 버전이 오르고 읽기 경로 산출물이 재컴파일된다.
@@ -13,14 +24,43 @@ public sealed class KnowledgeStore : IKnowledgeProvider
     private readonly object _gate = new();
     private readonly Dictionary<string, KnowledgeDoc> _docs = new();      // id → published/deprecated
     private readonly Dictionary<string, KnowledgeDoc> _pending = new();   // id → 승인 대기 (게시본과 공존 가능 = 개정)
+    private readonly IJournal<KnowledgeChange> _journal;
     private volatile CompiledKnowledge _compiled;
     private int _version;
 
-    public KnowledgeStore()
+    public KnowledgeStore(IJournalFactory? journals = null)
     {
+        _journal = (journals ?? NullJournalFactory.Instance).Open<KnowledgeChange>("knowledge");
+
+        // 시드를 먼저 깔고 저널을 그 위에 얹는다 — 시드 문서의 개정본이 시드를 덮는다.
         foreach (var doc in KnowledgeSeed.Documents) _docs[doc.Id] = doc;
         _version = 1;
+
+        foreach (var change in _journal.Load()) Replay(change);
+
+        // 재컴파일은 마지막에 한 번. 복원 중간 상태를 읽는 경로는 없다.
         _compiled = KnowledgeCompiler.Compile(_docs.Values, _version);
+    }
+
+    /// <summary>
+    /// 저널 1건 반영. 버전은 <b>게시·폐기 횟수만큼</b> 오른다 — 재시작 후 버전이 되감기면
+    /// 저신뢰 매핑의 재추론 백오프가 "온톨로지가 바뀌었다"고 잘못 판단한다(§5.5 7단계).
+    /// </summary>
+    private void Replay(KnowledgeChange change)
+    {
+        switch (change.Op)
+        {
+            case KnowledgeChange.Submitted:
+                _pending[change.Doc.Id] = change.Doc;
+                break;
+
+            case KnowledgeChange.Approved:
+            case KnowledgeChange.Deprecated:
+                _docs[change.Doc.Id] = change.Doc;
+                _pending.Remove(change.Doc.Id);
+                _version++;
+                break;
+        }
     }
 
     /// <summary>읽기 경로가 소비하는 현재 컴파일 스냅숏. 관측당 조회 — 잠금 없이 읽는다.</summary>
@@ -79,6 +119,7 @@ public sealed class KnowledgeStore : IKnowledgeProvider
                 UpdatedAt = at,
             };
             _pending[doc.Id] = draft;
+            _journal.Append(new KnowledgeChange(KnowledgeChange.Submitted, draft));
             return (draft, null);
         }
     }
@@ -102,6 +143,7 @@ public sealed class KnowledgeStore : IKnowledgeProvider
             var published = draft with { Status = KnowledgeStatus.Published, ApprovedBy = approvedBy, UpdatedAt = at };
             _pending.Remove(id);
             _docs[id] = published;
+            _journal.Append(new KnowledgeChange(KnowledgeChange.Approved, published));
             Recompile();
             return (published, null);
         }
@@ -120,6 +162,7 @@ public sealed class KnowledgeStore : IKnowledgeProvider
             var deprecated = doc with { Status = KnowledgeStatus.Deprecated, ApprovedBy = actor, UpdatedAt = at };
             _docs[id] = deprecated;
             _pending.Remove(id);   // 폐기 대상의 대기 개정도 함께 무효
+            _journal.Append(new KnowledgeChange(KnowledgeChange.Deprecated, deprecated));
             Recompile();
             return (deprecated, null);
         }

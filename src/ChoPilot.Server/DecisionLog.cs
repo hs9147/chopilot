@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ChoPilot.Core;
 
 namespace ChoPilot.Server;
 
@@ -26,7 +27,18 @@ public sealed record DecisionEntry(
 public sealed class DecisionLog
 {
     private readonly ConcurrentQueue<DecisionEntry> _log = new();
+    private readonly IJournal<DecisionEntry> _journal;
     private long _seq;
+
+    public DecisionLog(IJournalFactory? journals = null)
+    {
+        _journal = (journals ?? NullJournalFactory.Instance).Open<DecisionEntry>("decisions");
+        foreach (var entry in _journal.Load())
+        {
+            _log.Enqueue(entry);
+            if (entry.Seq > _seq) _seq = entry.Seq;
+        }
+    }
 
     public DecisionEntry Record(string action, string actor, string signature, string scope, double confidence, string detail)
     {
@@ -41,6 +53,7 @@ public sealed class DecisionLog
             Detail: detail);
 
         _log.Enqueue(entry);
+        _journal.Append(entry);
         return entry;
     }
 

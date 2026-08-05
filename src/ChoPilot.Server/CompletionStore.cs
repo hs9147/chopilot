@@ -50,13 +50,25 @@ public sealed class CompletionStore
 {
     private readonly object _gate = new();
     private readonly List<CompletionRecord> _records = new();
+    private readonly IJournal<CompletionRecord> _journal;
+
+    public CompletionStore(IJournalFactory? journals = null)
+    {
+        _journal = (journals ?? NullJournalFactory.Instance).Open<CompletionRecord>("completions");
+        _records.AddRange(_journal.Load());
+    }
 
     public int Count { get { lock (_gate) return _records.Count; } }
 
     public void Record(CompletionRecord record)
     {
         if (record.Observed.Count == 0) return;   // 매핑이 없는 화면은 증거가 아니다
-        lock (_gate) _records.Add(record);
+
+        lock (_gate)
+        {
+            _records.Add(record);
+            _journal.Append(record);
+        }
     }
 
     public IReadOnlyList<CompletionRecord> Snapshot(int limit = 100)

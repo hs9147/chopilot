@@ -285,6 +285,7 @@ MCP 클라이언트는 `initialize` → `notifications/initialized` → `tools/c
 | VDI 리소스 | 세션 여유 내(CPU/메모리 상한 준수) |
 | 보안 | mTLS, VPC 내부, SSE-KMS, 전 관측 Audit |
 | 가용성 | 서버 장애 시 클라이언트 스풀 후 재전송 |
+| 내구성 | `Storage:Path` 설정 시 서버 저장소가 저널로 남아 재시작에 살아남는다 (ARCHITECTURE §12) |
 
 ### 7.1 적재 계약과 영구 거부 — 스풀이 막히지 않게 하는 조건
 

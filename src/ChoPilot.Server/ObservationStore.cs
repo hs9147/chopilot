@@ -11,10 +11,27 @@ public sealed record StoredObservation(
 public sealed class ObservationStore
 {
     private readonly ConcurrentDictionary<string, StoredObservation> _store = new();
+    private readonly IJournal<StoredObservation> _journal;
     private long _seq;
 
-    public void Put(string id, ObservationEvent evt, MappingEntry entry, BusinessObject bo) =>
-        _store[id] = new StoredObservation(Interlocked.Increment(ref _seq), id, evt, entry, bo);
+    public ObservationStore(IJournalFactory? journals = null)
+    {
+        _journal = (journals ?? NullJournalFactory.Instance).Open<StoredObservation>("observations");
+
+        // 같은 id가 다시 나오면 나중 것이 이긴다 — 살아 있는 경로의 덮어쓰기와 같은 규칙.
+        foreach (var stored in _journal.Load())
+        {
+            _store[stored.ObservationId] = stored;
+            if (stored.Seq > _seq) _seq = stored.Seq;
+        }
+    }
+
+    public void Put(string id, ObservationEvent evt, MappingEntry entry, BusinessObject bo)
+    {
+        var stored = new StoredObservation(Interlocked.Increment(ref _seq), id, evt, entry, bo);
+        _store[id] = stored;
+        _journal.Append(stored);
+    }
 
     public StoredObservation? Get(string id) =>
         _store.TryGetValue(id, out var v) ? v : null;

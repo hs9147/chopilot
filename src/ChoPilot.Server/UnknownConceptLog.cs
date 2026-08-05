@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ChoPilot.Core;
 
 namespace ChoPilot.Server;
 
@@ -34,6 +35,13 @@ public sealed record UnknownConceptCandidate(
 public sealed class UnknownConceptLog
 {
     private readonly ConcurrentQueue<UnknownConceptAttempt> _attempts = new();
+    private readonly IJournal<UnknownConceptAttempt> _journal;
+
+    public UnknownConceptLog(IJournalFactory? journals = null)
+    {
+        _journal = (journals ?? NullJournalFactory.Instance).Open<UnknownConceptAttempt>("unknown-concepts");
+        foreach (var attempt in _journal.Load()) _attempts.Enqueue(attempt);
+    }
 
     public void Record(string userId, string signature, string businessObject,
                        IEnumerable<string> terms, DateTimeOffset at)
@@ -41,7 +49,9 @@ public sealed class UnknownConceptLog
         foreach (var term in terms)
         {
             if (string.IsNullOrWhiteSpace(term)) continue;
-            _attempts.Enqueue(new UnknownConceptAttempt(term.Trim(), userId, signature, businessObject, at));
+            var attempt = new UnknownConceptAttempt(term.Trim(), userId, signature, businessObject, at);
+            _attempts.Enqueue(attempt);
+            _journal.Append(attempt);
         }
     }
 

@@ -18,10 +18,20 @@ var cfg = builder.Configuration;
 // 클라이언트 JSON(PascalCase)과 record 생성자 파라미터 매칭
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.PropertyNameCaseInsensitive = true);
 
-builder.Services.AddSingleton<IMappingCache, InMemoryMappingCache>();
+// 영속화 (ARCHITECTURE §11). Storage:Path를 주지 않으면 지금까지와 똑같이 인메모리로 돈다 —
+// 테스트와 CI가 디스크를 건드리지 않는 이유이자, 영속화가 선택인 이유다.
+// 저장하지 않는 것: FoundationStore(외부 출처에서 다시 받는 게 맞다. 관측 파생물을
+// 마스터로 굳히면 계보가 뒤집힌다 — §5.6).
+builder.Services.AddSingleton<IJournalFactory>(_ =>
+    cfg["Storage:Path"] is { Length: > 0 } path
+        ? new FileJournalFactory(path)
+        : NullJournalFactory.Instance);
+
+builder.Services.AddSingleton<IMappingCache>(sp =>
+    new InMemoryMappingCache(sp.GetRequiredService<IJournalFactory>()));
 builder.Services.AddSingleton<ObservationStore>();
 builder.Services.AddSingleton<AuditService>();
-builder.Services.AddSingleton<UepStore>();
+builder.Services.AddSingleton(sp => new UepStore(sp.GetRequiredService<IJournalFactory>()));
 builder.Services.AddSingleton<DecisionLog>();
 builder.Services.AddSingleton<SuggestionFeedbackStore>();
 builder.Services.AddSingleton<PersonalizationService>();
@@ -135,11 +145,60 @@ builder.Services.AddSingleton(sp => new MappingResolver(
 
 var app = builder.Build();
 
+// 저장소를 미리 만든다 — 지연 생성이면 복원 실패가 첫 요청에서야 드러난다.
+// 시작하자마자 무엇이 얼마나 복원됐는지(그리고 무엇이 손상됐는지) 로그에 남긴다.
+{
+    var journals = app.Services.GetRequiredService<IJournalFactory>();
+    foreach (var eager in new object[]
+             {
+                 app.Services.GetRequiredService<IMappingCache>(),
+                 app.Services.GetRequiredService<ObservationStore>(),
+                 app.Services.GetRequiredService<AuditService>(),
+                 app.Services.GetRequiredService<UepStore>(),
+                 app.Services.GetRequiredService<DecisionLog>(),
+                 app.Services.GetRequiredService<SuggestionFeedbackStore>(),
+                 app.Services.GetRequiredService<KnowledgeStore>(),
+                 app.Services.GetRequiredService<UnknownConceptLog>(),
+                 app.Services.GetRequiredService<EntityStore>(),
+                 app.Services.GetRequiredService<CompletionStore>(),
+             }) _ = eager;
+
+    var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Storage");
+    if (journals is FileJournalFactory files)
+    {
+        var status = files.Status();
+        log.LogInformation("저널 복원: {Dir} — {Records}건, 손상 {Corrupt}줄",
+            files.Directory, status.Sum(s => s.Restored), status.Sum(s => s.Corrupt));
+        foreach (var s in status.Where(s => s.Corrupt > 0))
+            log.LogWarning("저널 '{Name}'에서 {Corrupt}줄을 건너뛰었다 (쓰기 도중 종료된 흔적)", s.Name, s.Corrupt);
+    }
+    else
+    {
+        log.LogWarning("영속화 없음 — 재시작하면 지식·매핑 캐시·감사 로그가 사라진다. Storage:Path로 켠다.");
+    }
+}
+
 // 측정 대시보드(wwwroot/index.html). PHASE0-MEASUREMENT의 jq/curl 절차를 화면으로 대체한다.
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// 영속화 상태 (ARCHITECTURE §11). durable=false면 재시작에 전부 사라진다는 뜻이다.
+app.MapGet("/v1/storage", (IJournalFactory journals) =>
+{
+    var files = journals as FileJournalFactory;
+    var status = files?.Status() ?? Array.Empty<JournalStatus>();
+
+    return Results.Ok(new
+    {
+        durable = files is not null,
+        path = files?.Directory,
+        restored = status.Sum(s => s.Restored),
+        corrupt = status.Sum(s => s.Corrupt),
+        journals = status,
+    });
+});
 
 app.MapPost("/v1/observations",
     async (ObservationEvent? evt, MappingResolver resolver, ObservationStore store,
