@@ -30,6 +30,11 @@ const state = {
   concepts: [],
   editing: null,          // 보정 중인 검수 큐 항목
   actor: localStorage.getItem(ACTOR_KEY) || '',
+  knowledge: [],          // 지식 문서(초안 + 게시)
+  knowledgeVersion: 0,
+  signals: null,          // 미지 개념 후보
+  myProfile: null,        // 사용자 축 뷰(저장되지 않음 — 매 조회마다 렌더된다)
+  openDraft: null,
 };
 
 /* ── 유틸 ─────────────────────────────────────────────── */
@@ -135,11 +140,16 @@ async function uploadFiles(fileList) {
 
 /* ── 조회 & 렌더 ──────────────────────────────────────── */
 
+// 지식 조회는 personal 스코프 문서를 위해 측정자 헤더가 필요하다.
+const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor } } : undefined);
+
 async function refreshAll() {
   try {
-    const [metrics, observations, signatures, review, decisions, suggestions, ontology] = await Promise.all([
+    const [metrics, observations, signatures, review, decisions, suggestions, ontology,
+           knowledge, signals] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
+      api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -149,6 +159,10 @@ async function refreshAll() {
     state.decisions = decisions.entries;
     state.suggestions = suggestions.stats;
     state.concepts = ontology.concepts;
+    state.knowledge = knowledge.items;
+    state.knowledgeVersion = knowledge.version;
+    state.signals = signals;
+    state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
   } catch (err) {
@@ -160,6 +174,7 @@ async function refreshAll() {
   renderSignatures();
   renderReview();
   renderDecisions();
+  renderKnowledge();
   renderObservations();
   renderVerdict();
   if (state.selected) await selectObservation(state.selected);
@@ -354,6 +369,181 @@ async function promoteEntry(entry) {
   } catch (err) {
     msg.className = 'warn';
     msg.textContent = `승격 실패: ${err.message}`;
+  }
+}
+
+/* ── 지식 (온톨로지·규칙) ─────────────────────────────── */
+
+// 문서 본문은 markdown 조각이다. esc() 이후에만 태그를 만든다 — 순서가 뒤집히면 주입이 된다.
+function miniMarkdown(text) {
+  return esc(text)
+    .split('\n')
+    .map((line) => {
+      const inline = line
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/`(.+?)`/g, '<code>$1</code>');
+      if (inline.startsWith('## ')) return `<h4>${inline.slice(3)}</h4>`;
+      if (inline.startsWith('- ')) return `<div class="md-li">• ${inline.slice(2)}</div>`;
+      return inline.trim() ? `<p>${inline}</p>` : '';
+    })
+    .join('');
+}
+
+const isDraft = (d) => d.status === 'pending_review';
+
+function renderKnowledge() {
+  renderDrafts();
+  renderKnowledgeSignals();
+  renderPublished();
+  renderMyProfile();
+  renderDraftBody();
+}
+
+function renderDrafts() {
+  const box = $('knowledgeDrafts');
+  const drafts = state.knowledge.filter(isDraft);
+  if (drafts.length === 0) {
+    box.innerHTML = '<p class="empty">승인 대기 초안 없음 — 위에서 신호를 집계해 보라</p>';
+    return;
+  }
+
+  box.innerHTML = `<table>
+    <thead><tr>
+      <th>문서</th><th>타입</th><th>축</th>
+      <th class="num">지지도</th><th class="num">사용자</th><th>출처</th><th>작업</th>
+    </tr></thead>
+    <tbody>${drafts.map((d) => `<tr class="clickable ${state.openDraft === d.id ? 'selected' : ''}" data-id="${esc(d.id)}">
+      <td class="mono">${esc(d.id)}</td>
+      <td><span class="badge">${esc(d.type)}</span>${d.concept && d.concept.sensitive ? ' <span class="badge badge-mask">민감</span>' : ''}</td>
+      <td>${esc(d.axis)}</td>
+      <td class="num">${d.provenance.supportCount}</td>
+      <td class="num">${d.provenance.distinctUsers}</td>
+      <td class="hint">${esc((d.provenance.signalRefs || []).join(', '))} · ${esc(d.createdBy)}</td>
+      <td>
+        <button class="btn btn-sm btn-primary" data-approve="${esc(d.id)}">승인</button>
+        <button class="btn btn-sm btn-ghost" data-deprecate="${esc(d.id)}">폐기</button>
+      </td>
+    </tr>`).join('')}</tbody></table>`;
+
+  box.querySelectorAll('tr.clickable').forEach((tr) => {
+    tr.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      state.openDraft = state.openDraft === tr.dataset.id ? null : tr.dataset.id;
+      renderDrafts();
+      renderDraftBody();
+    });
+  });
+  box.querySelectorAll('[data-approve]').forEach((b) =>
+    b.addEventListener('click', () => knowledgeAction(b.dataset.approve, 'approve')));
+  box.querySelectorAll('[data-deprecate]').forEach((b) =>
+    b.addEventListener('click', () => knowledgeAction(b.dataset.deprecate, 'deprecate')));
+}
+
+function renderDraftBody() {
+  const box = $('draftBody');
+  const doc = state.knowledge.find((d) => d.id === state.openDraft);
+  if (!doc) { box.innerHTML = ''; return; }
+
+  box.innerHTML = `<div class="detail">
+    <h3 style="margin-top:0">${esc(doc.title)}</h3>
+    <div class="md">${miniMarkdown(doc.body)}</div>
+    ${doc.concept ? `<p class="hint">제안된 개념: <code>${esc(doc.concept.name)}</code> ·
+      타입 ${esc(doc.concept.type)} · 별칭 ${esc((doc.concept.aliases || []).join(', '))} ·
+      ${doc.concept.sensitive ? '<strong>민감</strong>' : '비민감'}</p>` : ''}
+    ${doc.required ? `<p class="hint">필수 필드: <code>${esc((doc.required.concepts || []).join(', '))}</code></p>` : ''}
+  </div>`;
+}
+
+function renderKnowledgeSignals() {
+  const box = $('knowledgeSignals');
+  const s = state.signals;
+  if (!s || s.candidates.length === 0) {
+    box.innerHTML = '<p class="empty">거부된 개념 시도 없음</p>';
+    return;
+  }
+
+  box.innerHTML = `<table>
+    <thead><tr><th>용어</th><th class="num">시도</th><th class="num">사용자</th><th>업무객체</th><th>마지막</th></tr></thead>
+    <tbody>${s.candidates.map((c) => `<tr>
+      <td>${esc(c.term)}</td>
+      <td class="num">${c.attempts}</td>
+      <td class="num">${c.distinctUsers}</td>
+      <td class="hint">${esc((c.businessObjects || []).join(', '))}</td>
+      <td class="hint">${esc(c.lastSeen.slice(0, 19).replace('T', ' '))}</td>
+    </tr>`).join('')}</tbody></table>
+    <p class="hint">초안이 되려면 <strong>지지도</strong>(기본 3회)와 <strong>k인</strong>(기본 2명)을 모두 넘어야 한다 —
+    한 사람에게서만 나온 패턴을 조직 지식으로 올리면 그 사람의 활동이 유출된다.</p>`;
+}
+
+function renderPublished() {
+  const box = $('knowledgePublished');
+  const docs = state.knowledge.filter((d) => d.status === 'published' && d.kind === 'curated');
+  box.innerHTML = `<p class="hint">지식 버전 <strong>${state.knowledgeVersion}</strong> ·
+    개념 ${state.concepts.length}개 · 게시 문서 ${docs.length}건</p>`
+    + `<table>
+      <thead><tr><th>문서</th><th>타입</th><th>제목</th><th>승인자</th><th>작업</th></tr></thead>
+      <tbody>${docs.map((d) => `<tr>
+        <td class="mono">${esc(d.id)}</td>
+        <td><span class="badge">${esc(d.type)}</span></td>
+        <td>${esc(d.title)}</td>
+        <td>${esc(d.approvedBy || '-')}</td>
+        <td><button class="btn btn-sm btn-ghost" data-dep="${esc(d.id)}">폐기</button></td>
+      </tr>`).join('')}</tbody></table>`;
+
+  box.querySelectorAll('[data-dep]').forEach((b) =>
+    b.addEventListener('click', () => knowledgeAction(b.dataset.dep, 'deprecate')));
+}
+
+function renderMyProfile() {
+  const box = $('myProfile');
+  if (!state.actor) { box.innerHTML = '<p class="empty">측정자 ID를 입력하면 본인 프로파일이 보인다</p>'; return; }
+  if (!state.myProfile) { box.innerHTML = `<p class="empty">${esc(state.actor)}의 관측이 없다</p>`; return; }
+  box.innerHTML = `<div class="detail"><div class="md">${miniMarkdown(state.myProfile.body)}</div></div>`;
+}
+
+async function knowledgeAction(id, action) {
+  const msg = $('aggregateMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  // 폐기는 개념이면 그 개념을 쓰는 매핑까지 정리한다 — 되돌릴 수 없다.
+  if (action === 'deprecate' && !confirm(`${id} 를 폐기한다. 이 개념을 쓰는 매핑에서 필드가 제거된다. 계속할까?`)) return;
+
+  try {
+    const result = await api(`/v1/knowledge/${encodeURIComponent(id)}/${action}`, {
+      method: 'POST',
+      headers: { 'X-ChoPilot-User': actor },
+    });
+    msg.className = 'hint';
+    msg.textContent = action === 'approve'
+      ? `${id} 게시됨 — 재배포 없이 온톨로지·가이드에 반영된다`
+      : `${id} 폐기됨 · 매핑 ${result.touchedMappings ?? 0}건 정리`;
+    state.openDraft = null;
+    await refreshAll();
+  } catch (err) {
+    msg.className = 'warn';
+    msg.textContent = `실패: ${err.message}`;
+  }
+}
+
+async function aggregate(dryRun) {
+  const msg = $('aggregateMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  try {
+    const result = await api(`/v1/knowledge/aggregate?dryRun=${dryRun}`, {
+      method: 'POST',
+      headers: { 'X-ChoPilot-User': actor },
+    });
+    const count = dryRun ? result.drafts.length : result.submitted;
+    msg.className = 'hint';
+    msg.textContent = `${dryRun ? '미리보기' : '검수 큐 적재'}: 초안 ${count}건`
+      + (result.skipped.length ? ` · 제외 ${result.skipped.length}건 (${result.skipped[0]}${result.skipped.length > 1 ? ' 외' : ''})` : '');
+    if (!dryRun) await refreshAll();
+  } catch (err) {
+    msg.className = 'warn';
+    msg.textContent = `집계 실패: ${err.message}`;
   }
 }
 
@@ -666,6 +856,14 @@ function buildMarkdown() {
          ...state.decisions.map((d) => `| ${d.at.slice(0, 19).replace('T', ' ')} | ${d.action} | ${d.actor} | \`${shortSig(d.signature)}\` | ${d.detail} |`)]
       : ['- 아직 사람이 개입한 이력이 없다. 저신뢰 매핑이 남아 있다면 적중률은 올라가지 않는다.']),
     '',
+    '## 지식 (ARCHITECTURE §5.5)',
+    '',
+    `- 지식 버전 ${state.knowledgeVersion} · 개념 ${state.concepts.length}개 · 승인 대기 초안 ${state.knowledge.filter(isDraft).length}건`,
+    ...(state.signals && state.signals.candidates.length
+      ? ['', '| 거부된 개념 | 시도 | 사용자 |', '|------|------|--------|',
+         ...state.signals.candidates.map((c) => `| ${c.term} | ${c.attempts} | ${c.distinctUsers} |`)]
+      : ['- 거부된 개념 시도 없음 — 온톨로지 결핍이 관측되지 않았거나 보정을 아무도 시도하지 않았다.']),
+    '',
     '## 제안 수락률 (ARCHITECTURE §9)',
     '',
     state.suggestions && state.suggestions.impressions
@@ -704,6 +902,11 @@ function bind() {
     state.actor = actor.value.trim();
     localStorage.setItem(ACTOR_KEY, state.actor);
   });
+  // 측정자가 바뀌면 personal 스코프 문서(내 프로파일)가 달라진다 — 입력이 멎으면 다시 읽는다.
+  actor.addEventListener('change', refreshAll);
+
+  $('aggregatePreview').addEventListener('click', () => aggregate(true));
+  $('aggregateSubmit').addEventListener('click', () => aggregate(false));
 
   for (const key of ['h1Total', 'h1Ok', 'h3Total', 'h3Ai', 'h3Base']) {
     const input = $(key);
@@ -729,6 +932,9 @@ function bind() {
       review: state.review,
       decisions: state.decisions,
       suggestions: state.suggestions,
+      knowledgeVersion: state.knowledgeVersion,
+      knowledge: state.knowledge,
+      signals: state.signals,
     }, null, 2), 'application/json'));
 
   $('resetScoring').addEventListener('click', () => {

@@ -124,6 +124,14 @@ code { font-family: var(--mono); font-size: .9em; }
 .drop.over { border-color: var(--accent); background: var(--pass-bg); }
 .check { display: block; margin-top: 12px; font-size: 13px; }
 
+/* 지식 문서 본문 (markdown 조각) */
+.md { font-size: 13px; line-height: 1.65; }
+.md h4 { margin: 14px 0 6px; font-size: 13px; font-weight: 650; }
+.md h4:first-child { margin-top: 0; }
+.md p { margin: 6px 0; }
+.md .md-li { margin: 3px 0 3px 4px; }
+.md code { font-size: 12px; }
+
 /* 검수·보정 입력 (측정자 ID, 개념 정정) */
 input.text {
   font: inherit; font-size: 13px; padding: 4px 8px; min-width: 150px;
