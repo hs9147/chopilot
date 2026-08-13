@@ -89,7 +89,7 @@ Storage__Path=/var/lib/chopilot
 ### 2.5 Bedrock 실추론
 
 ```bash
-UseBedrock=true Aws__Region=ap-northeast-2 dotnet run --project src/ChoPilot.Server
+UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 ```
 
 기본은 `StubAiMapper`(별칭 매칭)다. 모델 ID는 **inference profile**(`us.`/`global.` 접두)이어야 한다 —
@@ -128,7 +128,7 @@ UseBedrock=true Aws__Region=ap-northeast-2 dotnet run --project src/ChoPilot.Ser
 
 ```bash
 chopilot-dump --delay 5 --out pr-create.snapshot.json     # 캡처만
-chopilot-dump --upload http://<서버>:5080                  # 캡처 + 전송
+chopilot-dump --upload http://localhost:5080                  # 캡처 + 전송
 chopilot-dump --completed --upload                        # 저장 버튼 직후 = 작업 완료 신호
 ```
 
