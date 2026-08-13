@@ -126,17 +126,40 @@ UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 
 ### 4.1 Windows 실측 — `chopilot-dump`
 
+**원클릭.** 빌드 산출물의 `chopilot-watch.cmd`를 더블클릭하면 10초 간격 자동 관측이 시작된다.
+간격은 `CHOPILOT_WATCH_SECONDS` 환경변수로 바꾼다.
+
+**명령줄.**
+
 ```bash
+<<<<<<< HEAD
 chopilot-dump --delay 5 --out pr-create.snapshot.json     # 캡처만
 chopilot-dump --upload http://localhost:5080                  # 캡처 + 전송
+=======
+chopilot-dump --delay 5 --out pr-create.snapshot.json     # 한 번, 캡처만
+chopilot-dump --upload http://<서버>:5080                  # 한 번, 캡처 + 전송
+chopilot-dump --watch --upload                            # 자동 (10초 간격, Ctrl+C로 중단)
+chopilot-dump --watch 30 --rounds 20 --upload             # 30초 간격 20회차
+>>>>>>> 51b7a377dedadb67bfc4e9fef2fca28898d6aac5
 chopilot-dump --completed --upload                        # 저장 버튼 직후 = 작업 완료 신호
 ```
 
-- `--delay` 동안 관측할 화면을 포그라운드로 둔다.
-- `--completed`는 **사람이 붙이는 표시**다. 이 도구는 스냅숏 도구라 클릭을 볼 수 없다.
-  저장을 누른 직후에 캡처해야 그 화면이 필수 필드 규칙의 증거가 된다(ARCHITECTURE §5.7).
-- 전송 실패분은 durable 스풀에 남아 다음 실행에서 재전송된다.
-  서버가 **4xx로 거부**한 것은 재시도하지 않고 `*.bad`로 격리된다 — 큐 머리를 막지 않기 위해서다.
+- `--delay` 동안 관측할 화면을 포그라운드로 둔다(자동 모드는 첫 회차 전에만).
+- **화면이 그대로면 보내지 않는다.** 값까지 포함한 지문으로 판정하므로, 같은 화면에서 수량만
+  고쳐도 새 관측이다(서명은 그대로지만 사건은 일어났다). `--resend-unchanged`로 끌 수 있다.
+  이 건너뜀이 없으면 아무 일 없는 화면이 계속 쌓여 적중률이 학습이 아니라 반복을 센 값이 된다.
+- **동의 게이트는 매 회차 다시 본다.** 도중에 제외 대상 앱으로 옮겨가면 그 회차부터 막힌다.
+- 한 회차가 간격보다 오래 걸리면 다음 회차가 밀린다 — 겹쳐 쏘지 않는다.
+- 한 회차의 예외(창이 닫히는 등)는 루프를 죽이지 않는다.
+- `--bedrock` / `--baseline`은 자동 모드에서 **첫 회차만** 돈다. 매 회차 호출하면 비용이 시간에 비례한다.
+- 자동 모드의 `--out`은 회차마다 `<이름>-001.json`으로 쌓인다. stdout 덤프는 생략된다.
+
+**`--completed`는 `--watch`와 함께 쓸 수 없다.** 완료 신호는 "저장을 눌렀다"는 1회성 판단이라,
+반복 캡처에 붙이면 작성 중간 화면이 전부 완료로 기록되어 필수 필드 규칙의 증거가 오염된다.
+저장 직후에 따로 한 번 실행하라(ARCHITECTURE §5.7). 이 조합은 실행 시 거부된다.
+
+전송 실패분은 durable 스풀에 남아 다음 회차·다음 실행에서 재전송된다.
+서버가 **4xx로 거부**한 것은 재시도하지 않고 `*.bad`로 격리된다 — 큐 머리를 막지 않기 위해서다.
 
 ### 4.2 스냅숏 재생 — 측정 콘솔
 
@@ -226,6 +249,9 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 | 부팅 로그에 `N줄을 건너뛰었다` | 쓰기 도중 종료된 흔적. 그 줄만 폐기됐고 나머지는 무사하다 |
 | 관측 POST가 400 | 계약 위반이다. 응답 `detail`에 사유가 있다(`tree.children 없음`, `privacy.maskedRefs 없음` 등) |
 | 스풀에 `*.bad`가 쌓임 | 서버가 영구 거부(4xx)한 이벤트다. `detail`을 보고 클라이언트를 고쳐라 |
+| `--watch`가 계속 "변화 없음"만 찍음 | 정상이다 — 화면이 그대로면 보내지 않는다. 강제로 보내려면 `--resend-unchanged` |
+| `--watch`가 "관측 중단"만 찍음 | 동의 게이트가 막고 있다. `Consent:Enabled`와 제외 목록을 확인하라 |
+| `--completed --watch`가 거부됨 | 의도된 것이다. 완료 신호는 저장 직후 한 번만 따로 실행한다 |
 | 기반 대사가 전부 `no_master` | 출처를 아직 안 붙였다. `Foundation:*` 설정 후 `POST /v1/foundation/refresh` |
 | 기반 대사가 `unverifiable` | 마스터 키는 사업자번호인데 관측은 상호명이다. 화면에서 사업자번호를 함께 읽어야 한다 |
 
