@@ -77,13 +77,19 @@ var gate = new PrivacyGate(policyVersion: cfg.Privacy.PolicyVersion);
 var consentPolicy = new ConsentPolicy(cfg.Consent);
 var changes = new ChangeDetector();
 var jsonOpts = new JsonSerializerOptions { WriteIndented = true };
+var sessionId = Guid.NewGuid().ToString();
+var userId = string.IsNullOrWhiteSpace(cfg.Server.UserId)
+    ? HashUser(Environment.UserName)
+    : cfg.Server.UserId.Trim();
 
 // 업로드 자원은 <b>회차마다 만들지 않는다</b> — HttpClient를 반복 생성하면 소켓이 고갈된다.
 var url = opts.UploadUrl
     ?? (string.IsNullOrWhiteSpace(cfg.Server.IngestionEndpoint) ? "http://127.0.0.1:5080" : cfg.Server.IngestionEndpoint);
 var spoolDir = opts.SpoolDir ?? Path.Combine(AppContext.BaseDirectory, "spool");
 var spool = opts.Upload ? new EventSpool(spoolDir) : null;
-using var uploader = opts.Upload ? new Uploader(url) : null;
+using var uploader = opts.Upload
+    ? new Uploader(url, cfg.Server.BearerToken, userId, cfg.Server.TenantId)
+    : null;
 
 if (opts.Upload)
     Console.Error.WriteLine($"[chopilot-dump] upload → {url} (spool: {spoolDir}, 대기 {spool!.PendingCount})");
@@ -114,29 +120,30 @@ return single.Outcome == RoundOutcome.Failed ? 1 : 0;
 
 async Task<ObservationRound> RoundAsync(CancellationToken ct)
 {
-    var (screen, rawTree) = observer.CaptureForegroundWindow(cfg.Observation.MaxDepth, cfg.Observation.MaxNodes);
+    var (screen, rawTree, processName) =
+        observer.CaptureForegroundWindow(cfg.Observation.MaxDepth, cfg.Observation.MaxNodes);
 
     // 동의 게이트는 <b>매 회차</b> 다시 평가한다. 한 번만 보고 반복하면, 사용자가 도중에
     // 제외 대상 앱으로 옮겨가도 계속 캡처된다 — 그건 동의가 아니다.
-    var consent = consentPolicy.Evaluate(screen);
+    var consent = consentPolicy.Evaluate(screen, processName);
     if (!consent.Allowed) return new ObservationRound(RoundOutcome.Blocked, consent.Reason);
 
-    var (maskedTree, maskedRefs) = gate.Apply(rawTree);
+    var (safeScreen, maskedTree, maskedRefs) = gate.Apply(screen, rawTree);
 
     // 값까지 보는 지문. 아무 일도 없었으면 보내지 않는다 — 같은 화면을 반복 적재하면
     // 감사 로그와 적중률 분모가 부풀어 학습이 아니라 반복을 센 결과가 된다.
-    if (opts.SkipUnchanged && !changes.HasChanged(screen, maskedTree))
-        return new ObservationRound(RoundOutcome.Unchanged, SignatureService.NormalizeRoute(screen.Url));
+    if (opts.SkipUnchanged && !changes.HasChanged(safeScreen, maskedTree))
+        return new ObservationRound(RoundOutcome.Unchanged, SignatureService.NormalizeRoute(safeScreen.Url));
 
     captured++;
-    var signature = SignatureService.Compute(screen, maskedTree);
+    var signature = SignatureService.Compute(safeScreen, maskedTree);
 
     var evt = new ObservationEvent(
         EventId: Guid.NewGuid().ToString(),
-        SessionId: Environment.MachineName,
-        UserId: HashUser(Environment.UserName),
+        SessionId: sessionId,
+        UserId: userId,
         CapturedAt: DateTimeOffset.Now,
-        Screen: screen,
+        Screen: safeScreen,
         Tree: maskedTree,
         Privacy: new PrivacyInfo(gate.PolicyVersion, maskedRefs),
         Trigger: opts.Trigger);

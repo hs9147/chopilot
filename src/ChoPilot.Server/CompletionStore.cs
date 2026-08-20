@@ -13,7 +13,9 @@ public sealed record CompletionRecord(
     string Signature,
     IReadOnlyList<string> Observed,
     IReadOnlyList<string> Filled,
-    DateTimeOffset At);
+    DateTimeOffset At,
+    string EventId = "",
+    string TenantId = "default");
 
 /// <summary>개념 1개의 완료 시점 채움 통계.</summary>
 public sealed record ConceptFillStat(string Concept, int Observed, int Filled, int DistinctUsers)
@@ -50,12 +52,15 @@ public sealed class CompletionStore
 {
     private readonly object _gate = new();
     private readonly List<CompletionRecord> _records = new();
+    private readonly HashSet<string> _events = new(StringComparer.Ordinal);
     private readonly IJournal<CompletionRecord> _journal;
 
     public CompletionStore(IJournalFactory? journals = null)
     {
         _journal = (journals ?? NullJournalFactory.Instance).Open<CompletionRecord>("completions");
         _records.AddRange(_journal.Load());
+        foreach (var record in _records)
+            if (record.EventId.Length > 0) _events.Add(EventKey(record));
     }
 
     public int Count { get { lock (_gate) return _records.Count; } }
@@ -66,8 +71,11 @@ public sealed class CompletionStore
 
         lock (_gate)
         {
-            _records.Add(record);
+            var key = EventKey(record);
+            if (record.EventId.Length > 0 && _events.Contains(key)) return;
             _journal.Append(record);
+            _records.Add(record);
+            if (record.EventId.Length > 0) _events.Add(key);
         }
     }
 
@@ -110,4 +118,7 @@ public sealed class CompletionStore
             concepts,
             LastSeen: group.Max(r => r.At));
     }
+
+    private static string EventKey(CompletionRecord record) =>
+        $"{record.TenantId}\u001f{record.UserId}\u001f{record.EventId}";
 }

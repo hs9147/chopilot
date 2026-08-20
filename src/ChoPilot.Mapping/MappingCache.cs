@@ -8,6 +8,7 @@ public interface IMappingCache
 {
     MappingEntry? Get(string signature, string scope);
     void Put(MappingEntry entry);
+    void Remove(string signature, string scope);
 
     /// <summary>전체 엔트리 열람 (검수 큐·운영 진단용). 운영 DynamoDB는 scan/GSI로 대체.</summary>
     IEnumerable<MappingEntry> All();
@@ -26,7 +27,11 @@ public sealed class InMemoryMappingCache : IMappingCache
     public InMemoryMappingCache(IJournalFactory? journals = null)
     {
         _journal = (journals ?? NullJournalFactory.Instance).Open<MappingEntry>("mappings");
-        foreach (var entry in _journal.Load()) _store[Key(entry.Signature, entry.Scope)] = entry;
+        foreach (var entry in _journal.Load())
+        {
+            if (entry.Deleted) _store.TryRemove(Key(entry.Signature, entry.Scope), out _);
+            else _store[Key(entry.Signature, entry.Scope)] = entry;
+        }
     }
 
     private static string Key(string signature, string scope) => $"{scope}::{signature}";
@@ -36,8 +41,17 @@ public sealed class InMemoryMappingCache : IMappingCache
 
     public void Put(MappingEntry entry)
     {
+        if (_store.TryGetValue(Key(entry.Signature, entry.Scope), out var existing) &&
+            entry.Revision <= existing.Revision)
+            entry = entry with { Revision = existing.Revision + 1 };
         _store[Key(entry.Signature, entry.Scope)] = entry;
         _journal.Append(entry);
+    }
+
+    public void Remove(string signature, string scope)
+    {
+        if (!_store.TryRemove(Key(signature, scope), out var existing)) return;
+        _journal.Append(existing with { Revision = existing.Revision + 1, Deleted = true });
     }
 
     public IEnumerable<MappingEntry> All() => _store.Values;

@@ -10,13 +10,14 @@
 
 | 문서 | 내용 |
 |------|------|
-| [Proposal Draft.md](Proposal%20Draft.md) | 제안서 (v1.1) |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 상세 아키텍처 설계 (전제 D1~D5, 컴포넌트, 데이터모델, Adaptive Mapping, 개인화) |
+| [Proposal Draft.md](Proposal%20Draft.md) | 제안서 (v1.3) |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 상세 아키텍처 설계 (D1~D7, 컴포넌트, 보안, 변경 인지, 사용자 검측) |
 | [PHASE0-PLAN.md](PHASE0-PLAN.md) | Phase 0 위험 검증 실행계획 |
 | [PHASE0-KIT.md](PHASE0-KIT.md) | Phase 0 실행 키트 (템플릿·스키마·측정표) |
 | [PHASE0-MEASUREMENT.md](PHASE0-MEASUREMENT.md) | **Phase 0 실측 가이드** (가설별 절차·명령·함정) |
 | [PHASE1-DESIGN.md](PHASE1-DESIGN.md) | Phase 1 상세 설계 (Web Agent + Guide, 읽기 전용) |
 | [RUNBOOK.md](RUNBOOK.md) | **실행 가이드** (실행 모드·설정·5분 점검·트러블슈팅) |
+| [OPERATIONS-TRANSITION-GUIDE.md](OPERATIONS-TRANSITION-GUIDE.md) | **운영 전환 가이드** (출시 게이트·권한·Canary·롤백) |
 | [SETUP.md](SETUP.md) | 개발환경 설정 (요구사항·빌드·설정·AWS 자격증명·트러블슈팅) |
 
 ## 확정 설계 전제

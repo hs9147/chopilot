@@ -1,4 +1,7 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
+using System.Text;
+using System.Security.Cryptography;
 using ChoPilot.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
@@ -18,11 +21,11 @@ public sealed class UiaObserver : IDisposable
 {
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 
     private readonly UIA3Automation _automation = new();
-    private int _refCounter;
-
-    public (ScreenInfo Screen, UiNode Tree) CaptureForegroundWindow(int maxDepth = 25, int maxNodes = 4000)
+    public (ScreenInfo Screen, UiNode Tree, string? ProcessName) CaptureForegroundWindow(int maxDepth = 25, int maxNodes = 4000)
     {
         var hwnd = GetForegroundWindow();
         if (hwnd == IntPtr.Zero)
@@ -30,9 +33,8 @@ public sealed class UiaObserver : IDisposable
 
         var window = _automation.FromHandle(hwnd);
 
-        _refCounter = 0;
         var count = 0;
-        var tree = Serialize(window, 0, maxDepth, maxNodes, ref count);
+        var tree = Serialize(window, "node-root", 0, maxDepth, maxNodes, ref count);
 
         var url = TryGetUrl(window);
         var title = Prop(() => window.Properties.Name.ValueOrDefault);
@@ -41,26 +43,41 @@ public sealed class UiaObserver : IDisposable
             Title: title,
             RecordHint: ScreenIdentifier.Identify(url, title)); // H2 레코드 식별
 
-        return (screen, tree);
+        GetWindowThreadProcessId(hwnd, out var pid);
+        string? process = null;
+        try { process = Process.GetProcessById((int)pid).ProcessName; }
+        catch { /* window may have closed */ }
+        return (screen, tree, process);
     }
 
-    private UiNode Serialize(AutomationElement element, int depth, int maxDepth, int maxNodes, ref int count)
+    private UiNode Serialize(
+        AutomationElement element, string stableRef, int depth, int maxDepth, int maxNodes, ref int count)
     {
+        var automationId = NullIfEmpty(Prop(() => element.Properties.AutomationId.ValueOrDefault));
+        var role = Prop(() => element.Properties.ControlType.ValueOrDefault.ToString()) ?? "Unknown";
         var node = new UiNode(
-            Ref: $"n{++_refCounter}",
-            Role: Prop(() => element.Properties.ControlType.ValueOrDefault.ToString()) ?? "Unknown",
+            Ref: stableRef,
+            Role: role,
             Name: NullIfEmpty(Prop(() => element.Properties.Name.ValueOrDefault)),
             Value: NullIfEmpty(ReadValue(element)),
-            AutomationId: NullIfEmpty(Prop(() => element.Properties.AutomationId.ValueOrDefault)),
+            AutomationId: automationId,
             Children: new List<UiNode>());
 
         count++;
         if (depth >= maxDepth || count >= maxNodes) return node;
 
+        var childIndex = 0;
         foreach (var child in SafeChildren(element))
         {
             if (count >= maxNodes) break;
-            node.Children.Add(Serialize(child, depth + 1, maxDepth, maxNodes, ref count));
+            childIndex++;
+            var childId = NullIfEmpty(Prop(() => child.Properties.AutomationId.ValueOrDefault));
+            var childRole = Prop(() => child.Properties.ControlType.ValueOrDefault.ToString()) ?? "Unknown";
+            var segment = childId is { Length: > 0 }
+                ? "id-" + StableToken(childId)
+                : "role-" + StableToken(childRole) + "-" + childIndex;
+            node.Children.Add(Serialize(child, StableRef(stableRef, segment),
+                depth + 1, maxDepth, maxNodes, ref count));
         }
         return node;
     }
@@ -77,17 +94,48 @@ public sealed class UiaObserver : IDisposable
         catch { return null; }
     }
 
-    /// <summary>브라우저 주소창(첫 Edit)에서 URL 추정. 앱/브라우저별 보정 필요.</summary>
+    /// <summary>
+    /// 주소창 식별자가 확인되는 Edit만 URL로 수집한다. 첫 Edit는 폼 입력/비밀번호일 수 있어
+    /// URL로 취급하면 Privacy Gate 바깥의 개인정보를 화면 메타데이터로 승격시키는 결함이다.
+    /// </summary>
     private static string? TryGetUrl(AutomationElement window)
     {
         try
         {
-            var edit = window.FindFirstDescendant(cf => cf.ByControlType(ControlType.Edit));
-            var value = edit?.Patterns.Value.PatternOrDefault?.Value?.ValueOrDefault;
-            return NullIfEmpty(value);
+            foreach (var edit in window.FindAllDescendants(cf => cf.ByControlType(ControlType.Edit)))
+            {
+                var automationId = Prop(() => edit.Properties.AutomationId.ValueOrDefault) ?? "";
+                var name = Prop(() => edit.Properties.Name.ValueOrDefault) ?? "";
+                if (!IsAddressBar(automationId, name)) continue;
+
+                var value = edit.Patterns.Value.PatternOrDefault?.Value?.ValueOrDefault;
+                return PrivacyGate.NormalizeUrl(NullIfEmpty(value));
+            }
+            return null;
         }
         catch { return null; }
     }
+
+    private static bool IsAddressBar(string automationId, string name)
+    {
+        var candidate = (automationId + " " + name).ToLowerInvariant();
+        return candidate.Contains("omnibox") ||
+               candidate.Contains("address") ||
+               candidate.Contains("urlbar") ||
+               candidate.Contains("주소창");
+    }
+
+    private static string StableToken(string value)
+    {
+        var sb = new StringBuilder(value.Length);
+        foreach (var c in value)
+            sb.Append(char.IsLetterOrDigit(c) || c is '-' or '_' ? char.ToLowerInvariant(c) : '-');
+        return sb.ToString().Trim('-') is { Length: > 0 } token ? token : "unknown";
+    }
+
+    private static string StableRef(string parent, string segment) =>
+        "node-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(parent + "/" + segment)))[..20]
+            .ToLowerInvariant();
 
     private static T? Prop<T>(Func<T> getter)
     {

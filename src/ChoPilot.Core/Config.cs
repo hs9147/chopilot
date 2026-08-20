@@ -64,4 +64,12 @@ public sealed class ServerConfig
 {
     /// <summary>Ingestion 엔드포인트 (Phase 1 업로드용, PoC 단계에선 미사용 가능).</summary>
     public string IngestionEndpoint { get; set; } = "";
+
+    /// <summary>JWT/OIDC access token. 운영에서는 파일이 아니라 OS 보안 저장소/토큰 공급자에서 주입한다.</summary>
+    public string BearerToken { get; set; } = "";
+
+    /// <summary>개발 헤더 모드 또는 토큰 subject와의 계약 검증에 쓰는 사용자 ID.</summary>
+    public string UserId { get; set; } = "";
+
+    public string TenantId { get; set; } = "default";
 }

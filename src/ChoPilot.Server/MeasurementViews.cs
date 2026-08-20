@@ -57,7 +57,7 @@ public static class MeasurementViews
         var evt = stored.Event;
         var nodes = Flatten(evt.Tree);
         var masked = evt.Privacy.MaskedRefs.ToHashSet();
-        var residual = gate.ScanResidual(evt.Tree);
+        var residual = gate.ScanResidual(evt.Screen, evt.Tree);
 
         return new ObservationSummary(
             ObservationId: stored.ObservationId,
@@ -83,7 +83,7 @@ public static class MeasurementViews
     {
         var evt = stored.Event;
         var masked = evt.Privacy.MaskedRefs.ToHashSet();
-        var residual = gate.ScanResidual(evt.Tree).ToHashSet();
+        var residual = gate.ScanResidual(evt.Screen, evt.Tree).ToHashSet();
 
         var nodes = Flatten(evt.Tree)
             .Select(n => new InventoryNode(

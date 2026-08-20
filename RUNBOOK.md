@@ -2,6 +2,7 @@
 
 설계는 [ARCHITECTURE.md](ARCHITECTURE.md), 개요는 [README.md](README.md).
 이 문서는 **띄우고, 넣고, 확인하는** 절차만 담는다.
+Production 전환·Canary·롤백은 [OPERATIONS-TRANSITION-GUIDE.md](OPERATIONS-TRANSITION-GUIDE.md)를 따른다.
 
 ---
 
@@ -106,7 +107,7 @@ UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 |---|---|---|
 | `Auth:Mode` | `header` | `header`(검증 없음) \| `jwt` |
 | `Auth:AllowUnverifiedInProduction` | `false` | 운영에서 검증 없는 인증을 명시적으로 허용 |
-| `Auth:Jwt:SigningKey` / `Issuer` / `Audience` | — | jwt 모드 필수(SigningKey), 나머지는 주면 검증 |
+| `Auth:Jwt:SigningKey` / `Issuer` / `Audience` | — | jwt 모드 필수. Production에서는 모두 필수이며 issuer/audience를 검증 |
 | `Storage:Path` | (없음) | 저널 디렉터리. 비면 인메모리 |
 | `UseBedrock` | `false` | 실 AI 추론 |
 | `Knowledge:UseEditor` | `false` | 초안 본문을 LLM이 다듬음 (`UseBedrock`도 필요) |
@@ -132,15 +133,10 @@ UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 **명령줄.**
 
 ```bash
-<<<<<<< HEAD
-chopilot-dump --delay 5 --out pr-create.snapshot.json     # 캡처만
-chopilot-dump --upload http://localhost:5080                  # 캡처 + 전송
-=======
 chopilot-dump --delay 5 --out pr-create.snapshot.json     # 한 번, 캡처만
 chopilot-dump --upload http://<서버>:5080                  # 한 번, 캡처 + 전송
 chopilot-dump --watch --upload                            # 자동 (10초 간격, Ctrl+C로 중단)
 chopilot-dump --watch 30 --rounds 20 --upload             # 30초 간격 20회차
->>>>>>> 51b7a377dedadb67bfc4e9fef2fca28898d6aac5
 chopilot-dump --completed --upload                        # 저장 버튼 직후 = 작업 완료 신호
 ```
 

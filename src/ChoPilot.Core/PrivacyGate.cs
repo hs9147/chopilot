@@ -58,6 +58,31 @@ public sealed class PrivacyGate
         return (result, masked);
     }
 
+    /// <summary>
+    /// 화면 메타데이터와 트리를 함께 통과시키는 실제 전송 경계.
+    /// UIA의 Name·창 제목·URL에도 사용자 입력과 레코드 값이 들어갈 수 있으므로
+    /// 값만 마스킹한 트리는 안전한 페이로드가 아니다.
+    /// </summary>
+    public (ScreenInfo Screen, UiNode Tree, List<string> MaskedRefs) Apply(ScreenInfo screen, UiNode tree)
+    {
+        var (safeTree, masked) = Apply(tree);
+
+        var url = NormalizeUrl(screen.Url);
+        var title = SanitizeMetadata(url: false, screen.Title, "$screen.title", masked);
+        url = SanitizeMetadata(url: true, url, "$screen.url", masked);
+
+        RecordHint? hint = null;
+        if (screen.RecordHint is { } original)
+        {
+            var source = SanitizeMetadata(false, original.Source, "$screen.record.source", masked) ?? "";
+            var key = SanitizeMetadata(false, original.Key, "$screen.record.key", masked) ?? "";
+            var value = SanitizeMetadata(false, original.Value, "$screen.record.value", masked);
+            hint = new RecordHint(source, key, value);
+        }
+
+        return (new ScreenInfo(url, title, hint), safeTree, masked);
+    }
+
     private UiNode Walk(UiNode node, List<string> masked, bool inheritedSensitive)
     {
         var (value, action) = Evaluate(node, inheritedSensitive);
@@ -75,7 +100,9 @@ public sealed class PrivacyGate
             else if (!string.IsNullOrEmpty(child.Value)) carry = false;  // 값 노드가 라벨을 소비
         }
 
-        return node with { Value = value, Children = children };
+        var name = SanitizeMetadata(false, node.Name, $"{node.Ref}.name", masked);
+        var automationId = SanitizeMetadata(false, node.AutomationId, $"{node.Ref}.automationId", masked);
+        return node with { Name = name, Value = value, AutomationId = automationId, Children = children };
     }
 
     /// <summary>값 없이 민감 개념만 이름으로 가진 노드 = 뒤따르는 값의 라벨.</summary>
@@ -118,6 +145,49 @@ public sealed class PrivacyGate
 
             foreach (var child in node.Children) Scan(child);
         }
+    }
+
+    public IReadOnlyList<string> ScanResidual(ScreenInfo screen, UiNode tree)
+    {
+        var hits = ScanResidual(tree).ToList();
+        Scan("$screen.url", screen.Url);
+        Scan("$screen.title", screen.Title);
+        if (screen.RecordHint is { } hint)
+        {
+            Scan("$screen.record.source", hint.Source);
+            Scan("$screen.record.key", hint.Key);
+            Scan("$screen.record.value", hint.Value);
+        }
+        return hits;
+
+        void Scan(string location, string? value)
+        {
+            if (value is { Length: > 0 } text && text != MaskToken &&
+                _patterns.Any(rule => rule.Regex.IsMatch(text)))
+                hits.Add(location);
+        }
+    }
+
+    private string? SanitizeMetadata(bool url, string? value, string location, List<string> masked)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        foreach (var rule in _patterns)
+        {
+            if (!rule.Regex.IsMatch(value)) continue;
+            masked.Add(location);
+            return rule.Action == "block" ? null : MaskToken;
+        }
+        return value;
+    }
+
+    /// <summary>URL은 scheme/host/path만 남긴다. query와 fragment는 토큰·검색어·레코드 원문이 되기 쉽다.</summary>
+    public static string? NormalizeUrl(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)) return value;
+
+        var builder = new UriBuilder(uri) { Query = "", Fragment = "" };
+        return builder.Uri.GetLeftPart(UriPartial.Path);
     }
 
     private bool IsSensitiveName(string? name) =>

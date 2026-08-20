@@ -35,7 +35,8 @@ internal static class TestTokens
 
     public static string Issue(
         string subject, string? issuer = Issuer, string? audience = Audience,
-        string key = Key, TimeSpan? lifetime = null, string claimType = "sub")
+        string key = Key, TimeSpan? lifetime = null, string claimType = "sub",
+        IEnumerable<string>? roles = null)
     {
         var credentials = new SigningCredentials(
             new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)), SecurityAlgorithms.HmacSha256);
@@ -45,7 +46,8 @@ internal static class TestTokens
         var token = new JwtSecurityToken(
             issuer: issuer,
             audience: audience,
-            claims: new[] { new Claim(claimType, subject) },
+            claims: new[] { new Claim(claimType, subject) }
+                .Concat((roles ?? ChoPilotRole.All).Select(role => new Claim("role", role))),
             notBefore: expires.AddMinutes(-10),
             expires: expires,
             signingCredentials: credentials);
@@ -157,6 +159,15 @@ public class JwtResolverTests
 
         Assert.Contains("SigningKey", error.Message);
     }
+
+    [Fact]
+    public void SigningKeyMustHaveAtLeast32Bytes()
+    {
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            new JwtPrincipalResolver(new JwtAuthOptions { SigningKey = "too-short" }));
+
+        Assert.Contains("32", error.Message);
+    }
 }
 
 public class AuthenticationSetupTests
@@ -200,9 +211,22 @@ public class AuthenticationSetupTests
         var resolver = AuthenticationSetup.Create(Config(
             ("Auth:Mode", "jwt"),
             ("Auth:Jwt:SigningKey", TestTokens.Key),
-            ("Auth:Jwt:Issuer", TestTokens.Issuer)), isProduction: true);
+            ("Auth:Jwt:Issuer", TestTokens.Issuer),
+            ("Auth:Jwt:Audience", TestTokens.Audience)), isProduction: true);
 
         Assert.True(resolver.Verifies);
+    }
+
+    [Fact]
+    public void ProductionJwt_RequiresIssuerAndAudienceValidation()
+    {
+        var error = Assert.Throws<InvalidOperationException>(() =>
+            AuthenticationSetup.Create(Config(
+                ("Auth:Mode", "jwt"),
+                ("Auth:Jwt:SigningKey", TestTokens.Key),
+                ("Auth:Jwt:Issuer", TestTokens.Issuer)), isProduction: true));
+
+        Assert.Contains("Audience", error.Message);
     }
 
     [Fact]

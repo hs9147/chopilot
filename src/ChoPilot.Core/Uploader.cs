@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Net.Http.Headers;
 
 namespace ChoPilot.Core;
 
@@ -22,8 +23,8 @@ public sealed class Uploader : IDisposable
     private readonly HttpClient _http;
     private readonly bool _ownsClient;
 
-    public Uploader(string baseUrl)
-        : this(new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = TimeSpan.FromSeconds(30) },
+    public Uploader(string baseUrl, string? bearerToken = null, string? userId = null, string? tenantId = null)
+        : this(CreateClient(baseUrl, bearerToken, userId, tenantId),
                ownsClient: true)
     {
     }
@@ -33,6 +34,22 @@ public sealed class Uploader : IDisposable
     {
         _http = http;
         _ownsClient = ownsClient;
+    }
+
+    private static HttpClient CreateClient(
+        string baseUrl, string? bearerToken, string? userId, string? tenantId)
+    {
+        var client = new HttpClient { BaseAddress = new Uri(baseUrl), Timeout = TimeSpan.FromSeconds(30) };
+        if (!string.IsNullOrWhiteSpace(bearerToken))
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", bearerToken.Trim());
+        else if (!string.IsNullOrWhiteSpace(userId))
+        {
+            client.DefaultRequestHeaders.Add("X-ChoPilot-User", userId.Trim());
+            if (!string.IsNullOrWhiteSpace(tenantId))
+                client.DefaultRequestHeaders.Add("X-ChoPilot-Tenant", tenantId.Trim());
+        }
+        return client;
     }
 
     public Task<ServerResponse> PostObservationAsync(ObservationEvent evt, CancellationToken ct = default) =>

@@ -21,7 +21,8 @@ public sealed record AuditEntry(
     double DurationMs,
     int? InputTokens,
     int? OutputTokens,
-    string Source = MappingResolver.Source.Ai);   // trusted_cache | deferred_cache | ai
+    string Source = MappingResolver.Source.Ai,
+    string TenantId = "default");   // trusted_cache | deferred_cache | ai
 
 /// <summary>
 /// H3b(캐시 적중률)·H6(지연 p95, AI 토큰비용) 집계 (PHASE0-KIT §3.4·§3.5, PHASE1-DESIGN §7).
@@ -51,6 +52,7 @@ public sealed record MetricsSnapshot(
 public sealed class AuditService
 {
     private readonly ConcurrentQueue<AuditEntry> _log = new();
+    private readonly object _gate = new();
     private readonly IJournal<AuditEntry> _journal;
     private long _seq;
 
@@ -69,29 +71,34 @@ public sealed class AuditService
     public int CorruptOnLoad => _journal.Corrupt;
 
     public AuditEntry Record(
-        ObservationEvent evt, string signature, MappingResolver.ResolveResult result, double durationMs)
+        ObservationEvent evt, string signature, MappingResolver.ResolveResult result, double durationMs,
+        string tenantId = "default")
     {
-        var entry = result.Entry;
-        var e = new AuditEntry(
-            Seq: Interlocked.Increment(ref _seq),
-            At: DateTimeOffset.UtcNow,
-            EventId: evt.EventId,
-            UserId: evt.UserId,
-            SessionId: evt.SessionId,
-            Signature: signature,
-            BusinessObject: entry.BusinessObject,
-            Confidence: entry.Confidence,
-            CacheHit: result.CacheHit,
-            Provenance: entry.Mapping.FirstOrDefault()?.Provenance ?? "cache",
-            MaskedRefCount: evt.Privacy.MaskedRefs.Count,
-            Status: entry.Status,
-            DurationMs: durationMs,
-            InputTokens: result.InputTokens,
-            OutputTokens: result.OutputTokens,
-            Source: result.Source);
-        _log.Enqueue(e);
-        _journal.Append(e);
-        return e;
+        lock (_gate)
+        {
+            var entry = result.Entry;
+            var e = new AuditEntry(
+                Seq: Interlocked.Increment(ref _seq),
+                At: DateTimeOffset.UtcNow,
+                EventId: evt.EventId,
+                UserId: evt.UserId,
+                SessionId: evt.SessionId,
+                Signature: signature,
+                BusinessObject: entry.BusinessObject,
+                Confidence: entry.Confidence,
+                CacheHit: result.CacheHit,
+                Provenance: entry.Mapping.FirstOrDefault()?.Provenance ?? "cache",
+                MaskedRefCount: evt.Privacy.MaskedRefs.Count,
+                Status: entry.Status,
+                DurationMs: durationMs,
+                InputTokens: result.InputTokens,
+                OutputTokens: result.OutputTokens,
+                Source: result.Source,
+                TenantId: tenantId);
+            _journal.Append(e);
+            _log.Enqueue(e);
+            return e;
+        }
     }
 
     /// <summary>감사 로그 스냅샷(읽기 전용). 최신순.</summary>
@@ -140,4 +147,5 @@ public sealed class AuditService
         var rank = (int)Math.Ceiling(p * sorted.Length);
         return sorted[Math.Clamp(rank - 1, 0, sorted.Length - 1)];
     }
+
 }

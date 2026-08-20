@@ -1,5 +1,7 @@
 using Amazon;
 using Amazon.BedrockRuntime;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 using ChoPilot.Core;
 using ChoPilot.Mapping;
 using ChoPilot.Server;
@@ -14,9 +16,22 @@ using ChoPilot.Server;
 
 var builder = WebApplication.CreateBuilder(args);
 var cfg = builder.Configuration;
+builder.WebHost.ConfigureKestrel(options =>
+    options.Limits.MaxRequestBodySize = 5 * 1024 * 1024);
 
 // 클라이언트 JSON(PascalCase)과 record 생성자 파라미터 매칭
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.PropertyNameCaseInsensitive = true);
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("ingestion", limiter =>
+    {
+        limiter.PermitLimit = cfg.GetValue<int?>("Limits:IngestionPerMinute") ?? 120;
+        limiter.Window = TimeSpan.FromMinutes(1);
+        limiter.QueueLimit = 0;
+        limiter.AutoReplenishment = true;
+    });
+});
 
 // 영속화 (ARCHITECTURE §11). Storage:Path를 주지 않으면 지금까지와 똑같이 인메모리로 돈다 —
 // 테스트와 CI가 디스크를 건드리지 않는 이유이자, 영속화가 선택인 이유다.
@@ -35,6 +50,8 @@ builder.Services.AddSingleton(sp => new UepStore(sp.GetRequiredService<IJournalF
 builder.Services.AddSingleton<DecisionLog>();
 builder.Services.AddSingleton<SuggestionFeedbackStore>();
 builder.Services.AddSingleton<PersonalizationService>();
+builder.Services.AddSingleton<IngestionCoordinator>();
+builder.Services.AddSingleton<FeedbackService>();
 
 // Curated Knowledge Plane (ARCHITECTURE §5.4 Plane 3) — 온톨로지·규칙의 런타임 진실.
 builder.Services.AddSingleton<KnowledgeStore>();
@@ -166,6 +183,7 @@ var app = builder.Build();
                  app.Services.GetRequiredService<UnknownConceptLog>(),
                  app.Services.GetRequiredService<EntityStore>(),
                  app.Services.GetRequiredService<CompletionStore>(),
+                 app.Services.GetRequiredService<FeedbackService>(),
              }) _ = eager;
 
     var auth = app.Services.GetRequiredService<IUserPrincipalResolver>();
@@ -194,6 +212,16 @@ var app = builder.Build();
 
 // 주체 관문은 라우팅보다 앞이다 — 엔드포인트마다 인증을 반복하면 그중 하나는 반드시 빠진다.
 app.UseMiddleware<PrincipalMiddleware>();
+app.UseMiddleware<ApiAuthorizationMiddleware>();
+app.UseRateLimiter();
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Append("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Append("Referrer-Policy", "same-origin");
+    context.Response.Headers.Append("Content-Security-Policy",
+        "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'");
+    await next();
+});
 
 // 측정 대시보드(wwwroot/index.html). PHASE0-MEASUREMENT의 jq/curl 절차를 화면으로 대체한다.
 app.UseDefaultFiles();
@@ -226,14 +254,42 @@ app.MapGet("/v1/storage", (IJournalFactory journals) =>
 });
 
 app.MapPost("/v1/observations",
-    async (ObservationEvent? evt, MappingResolver resolver, ObservationStore store,
+    async (HttpRequest request, ObservationEvent? evt, MappingResolver resolver, ObservationStore store,
            AuditService audit, UepStore uep, IKnowledgeProvider knowledgeProvider,
-           EntityStore entities, CompletionStore completions) =>
+           EntityStore entities, CompletionStore completions, IngestionCoordinator coordinator,
+           PrivacyGate privacyGate, CancellationToken ct) =>
 {
     // 계약 위반은 장애가 아니라 거부다. 500을 내면 클라이언트 스풀이 그것을 서버 장애로 읽고
     // 순서 보존을 위해 큐 머리에 남긴다 — 그 뒤의 모든 관측이 영원히 도달하지 못한다.
     if (!ObservationContract.IsValid(evt, out var violation))
         return Results.BadRequest(new { error = "invalid observation event", detail = violation });
+
+    var authResolver = request.HttpContext.RequestServices.GetRequiredService<IUserPrincipalResolver>();
+    if (authResolver.Verifies && privacyGate.ScanResidual(evt.Screen, evt.Tree).Count > 0)
+        return Results.BadRequest(new { error = "privacy_residual_detected" });
+    var principal = RequestUser.Principal(request);
+    if (principal is null && !authResolver.Verifies)
+        principal = new UserPrincipal(evt.UserId, AuthMethod.TrustedHeader, "default", ChoPilotRole.All);
+    if (principal is null || !(principal.IsInRole(ChoPilotRole.IngestionClient) ||
+                               principal.IsInRole(ChoPilotRole.EndUser)))
+        return RequestUser.RequireAnyRole(request, out _, ChoPilotRole.IngestionClient, ChoPilotRole.EndUser)!;
+
+    // 본문은 신원을 정하지 못한다. 전환 기간에는 필드를 유지하되 검증된 주체와 다르면 즉시 거부한다.
+    if (!string.Equals(evt.UserId, principal.UserId, StringComparison.Ordinal))
+        return Results.Json(new
+        {
+            error = "principal_mismatch",
+            detail = "observation.userId must match the authenticated subject",
+        }, statusCode: StatusCodes.Status403Forbidden);
+
+    evt = evt with { UserId = principal.UserId };
+
+    await using var lease = await coordinator.AcquireAsync(
+        principal.TenantId, principal.UserId, evt.EventId, ct);
+
+    // at-least-once 재전송은 최초 영수증을 그대로 돌려주며 AI·Audit·UEP·Entity를 다시 실행하지 않는다.
+    if (store.Get(evt.EventId, principal.TenantId) is { } accepted)
+        return ObservationAccepted(accepted, replayed: true);
 
     // 서명→매핑→BO 구간을 계측한다. 캐시 미스(=Bedrock 호출)와 HIT의 차이가 여기서 드러난다.
     var started = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -249,16 +305,17 @@ app.MapPost("/v1/observations",
 
     var durationMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
 
-    store.Put(evt.EventId, evt, res.Entry, bo);
-    audit.Record(evt, signature, res, durationMs);   // 불변 감사(Exit #4) + 지표 원자료
+    audit.Record(evt, signature, res, durationMs, principal.TenantId);   // 불변 감사(Exit #4) + 지표 원자료
 
     // 개인화 축적(Exit ⑤, D5). 시각은 서버 수신 시각 — 클라이언트 시계에 좌우되면 안 된다.
     // route·title은 UEP를 사람이 읽을 수 있게 만든다: 해시만 남으면 다음작업 제안을 문장으로 쓸 수 없다.
     uep.RecordVisit(evt.UserId, signature, DateTimeOffset.UtcNow,
-        SignatureService.NormalizeRoute(evt.Screen.Url), evt.Screen.Title);
+        SignatureService.NormalizeRoute(evt.Screen.Url), evt.Screen.Title,
+        evt.EventId, principal.TenantId);
 
     // 엔티티 결정 1단(§6 Deterministic). BO의 비민감 값만 보므로 단가·금액은 애초에 도달하지 않는다.
-    entities.Record(EntityResolver.Extract(bo, knowledge), evt.UserId, signature, DateTimeOffset.UtcNow);
+    entities.Record(EntityResolver.Extract(bo, knowledge), evt.UserId, signature,
+        DateTimeOffset.UtcNow, evt.EventId, principal.TenantId);
 
     // 작업 완료 신호(§11). 저장을 누른 순간의 화면만이 "이 업무객체가 실제로 무엇을 요구했는가"를
     // 말해 준다 — 작성 중간의 빈칸은 아직 안 채운 것인지 필요 없는 것인지 구분되지 않는다.
@@ -268,39 +325,52 @@ app.MapPost("/v1/observations",
             res.Entry.BusinessObject, evt.UserId, signature,
             FieldFill.Observed(res.Entry),
             FieldFill.Filled(res.Entry, evt.Tree).ToList(),
-            DateTimeOffset.UtcNow));
+            DateTimeOffset.UtcNow,
+            evt.EventId,
+            principal.TenantId));
 
-    return Results.Ok(new
-    {
-        observation_id = evt.EventId,
-        signature,
-        status = "accepted",
-        cache_hit = res.CacheHit,
-        source = res.Source,          // trusted_cache | deferred_cache | ai — 미스와 AI 호출은 다르다
-        business_object = res.Entry.BusinessObject,
-        confidence = res.Entry.Confidence
-    });
-});
+    // 완료 표식은 마지막에 기록한다. 앞 단계가 실패하면 재시도가 누락 projection만 보충한다.
+    store.Put(evt.EventId, evt, res.Entry, bo, principal.TenantId, res.CacheHit, res.Source);
+    return ObservationAccepted(store.Get(evt.EventId, principal.TenantId)!, replayed: false);
+}).RequireRateLimiting("ingestion");
 
 app.MapGet("/v1/guide",
-    (string observation_id, ObservationStore store, SuggestionFeedbackStore suggestions, UepStore uep,
+    (string observation_id, HttpRequest request, ObservationStore store, UepStore uep,
+     SuggestionFeedbackStore suggestions,
      IKnowledgeProvider knowledgeProvider) =>
 {
-    var rec = store.Get(observation_id);
+    var authResolver = request.HttpContext.RequestServices.GetRequiredService<IUserPrincipalResolver>();
+    var principal = RequestUser.Principal(request);
+    if (principal is null && !authResolver.Verifies)
+    {
+        // 로컬 측정 모드는 body user가 유일한 식별자다. JWT 운영 모드에서는 이 fallback이 없다.
+        var local = store.Get(observation_id);
+        if (local is null) return Results.NotFound(new { error = "unknown observation_id" });
+        principal = new UserPrincipal(local.Event.UserId, AuthMethod.TrustedHeader, local.TenantId, ChoPilotRole.All);
+    }
+    if (principal is null || !(principal.IsInRole(ChoPilotRole.EndUser) ||
+                               principal.IsInRole(ChoPilotRole.OpsAuditor)))
+        return RequestUser.RequireAnyRole(request, out _, ChoPilotRole.EndUser, ChoPilotRole.OpsAuditor)!;
+
+    var rec = store.Get(observation_id, principal.TenantId);
     if (rec is null) return Results.NotFound(new { error = "unknown observation_id" });
+    if (rec.Event.UserId != principal.UserId && !principal.IsInRole(ChoPilotRole.OpsAuditor))
+        return Results.NotFound(new { error = "unknown observation_id" });
 
     var guide = GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject, knowledgeProvider.Current);
 
     // 화면 안의 빈칸 힌트 뒤에 "이 화면 다음에 무엇을 하는가"를 붙인다.
     // 화면 하나만 보면 다음 '작업'이 아니라 다음 '입력칸'까지만 말할 수 있다(UEP 전이, D5).
-    var next = uep.NextScreens(rec.Event.UserId, rec.Entry.Signature, limit: 2)
+    var next = uep.NextScreens(rec.Event.UserId, rec.Entry.Signature,
+            limit: 2, tenantId: principal.TenantId)
         .Select(t => GuideService.NextScreenHint(guide.BusinessObject, t));
     guide = guide with { NextHints = guide.NextHints.Concat(next).ToList() };
 
-    // 제안이 사용자에게 나갔다는 사실을 남긴다 — 수락률의 분모(ARCHITECTURE §9).
-    // 사용자는 헤더가 아니라 관측이 정한다: 가이드는 그 관측을 만든 사람의 것이다.
-    suggestions.RecordImpressions(rec.Event.UserId, observation_id, rec.Entry.Signature,
-        guide.BusinessObject, guide.NextHints, DateTimeOffset.UtcNow);
+    // 호환성: 개발 전용 trusted-header 측정 콘솔은 기존 GET 기반 노출 계측을 유지한다.
+    // JWT/OIDC 운영 경로에서는 GET이 상태를 바꾸지 않으며 /v1/suggestions/impressions만 쓴다.
+    if (!authResolver.Verifies)
+        suggestions.RecordImpressions(rec.Event.UserId, observation_id, rec.Entry.Signature,
+            guide.BusinessObject, guide.NextHints, DateTimeOffset.UtcNow);
 
     return Results.Ok(guide);
 });
@@ -419,6 +489,62 @@ app.MapGet("/v1/uep", (HttpRequest request, UepStore uep) =>
 // 하드코딩이 아니라 게시된 지식의 컴파일 결과다 — 개념 문서가 승인되면 여기 즉시 나타난다.
 app.MapGet("/v1/ontology", (IKnowledgeProvider knowledge) =>
     Results.Ok(new { version = knowledge.Current.Version, concepts = knowledge.Current.Concepts }));
+
+// ── 사용자 검측·피드백 (D7, ARCHITECTURE §3.5/§4.4) ────────────────────────
+app.MapGet("/v1/me/review-tasks",
+    (HttpRequest request, FeedbackService feedback, int? limit) =>
+{
+    if (RequestUser.RequireAnyRole(request, out var principal, ChoPilotRole.EndUser) is { } unauthorized)
+        return unauthorized;
+    return Results.Ok(new
+    {
+        tasks = feedback.Tasks(principal.TenantId, principal.UserId, limit ?? 50),
+    });
+});
+
+app.MapPost("/v1/feedback",
+    (HttpRequest request, FeedbackCommand command, FeedbackService feedback) =>
+{
+    if (RequestUser.RequireAnyRole(request, out var principal, ChoPilotRole.EndUser) is { } unauthorized)
+        return unauthorized;
+
+    var result = feedback.Submit(principal.TenantId, principal.UserId, command);
+    if (result.Conflict)
+        return Results.Json(new { error = result.Error }, statusCode: StatusCodes.Status409Conflict);
+    return result.Record is null
+        ? Results.BadRequest(new { error = result.Error })
+        : Results.Ok(result.Record);
+});
+
+app.MapPost("/v1/feedback/{id}/undo",
+    (string id, HttpRequest request, FeedbackService feedback) =>
+{
+    if (RequestUser.RequireAnyRole(request, out var principal, ChoPilotRole.EndUser) is { } unauthorized)
+        return unauthorized;
+    var result = feedback.Undo(principal.TenantId, principal.UserId, id);
+    return result.Record is null
+        ? Results.BadRequest(new { error = result.Error })
+        : Results.Ok(result.Record);
+});
+
+app.MapGet("/v1/reviews/feedback",
+    (HttpRequest request, FeedbackService feedback, int? limit) =>
+{
+    if (RequestUser.RequireAnyRole(request, out var principal, ChoPilotRole.Reviewer) is { } unauthorized)
+        return unauthorized;
+    return Results.Ok(new { entries = feedback.PendingReviews(principal.TenantId, limit ?? 100) });
+});
+
+app.MapPost("/v1/reviews/{id}/decision",
+    (string id, HttpRequest request, FeedbackReviewDecision decision, FeedbackService feedback) =>
+{
+    if (RequestUser.RequireAnyRole(request, out var principal, ChoPilotRole.Reviewer) is { } unauthorized)
+        return unauthorized;
+    var result = feedback.Review(principal.TenantId, principal.UserId, id, decision.Approve);
+    return result.Record is null
+        ? Results.NotFound(new { error = result.Error })
+        : Results.Ok(result.Record);
+});
 
 // ── 지식 수명주기 (ARCHITECTURE §5.5, PHASE1-DESIGN §4.5) ───────────────────
 // 제출 → 승인(게시) → 폐기. 삭제는 없다. 게시·폐기는 온톨로지·규칙을 영구히 바꾸는
@@ -592,6 +718,29 @@ app.MapPost("/v1/correction",
 
 // ── 제안 판단 (ARCHITECTURE §9 KPI '제안 수락률') ───────────────────────────
 // 사용자가 제안을 수락했는지 거부했는지 보고한다. 무시는 보고하지 않는다 — 판단의 부재가 곧 무시다.
+app.MapPost("/v1/suggestions/impressions",
+    (HttpRequest request, SuggestionImpressionRequest req, ObservationStore store,
+     SuggestionFeedbackStore suggestions, UepStore uep, IKnowledgeProvider knowledgeProvider) =>
+{
+    if (RequestUser.RequireAnyRole(request, out var principal, ChoPilotRole.EndUser) is { } unauthorized)
+        return unauthorized;
+
+    var rec = store.Get(req.ObservationId, principal.TenantId);
+    if (rec is null || rec.Event.UserId != principal.UserId)
+        return Results.NotFound(new { error = "unknown observation_id" });
+
+    var guide = GuideService.Build(rec.Entry, rec.Event.Tree, rec.BusinessObject, knowledgeProvider.Current);
+    var next = uep.NextScreens(rec.Event.UserId, rec.Entry.Signature,
+            limit: 2, tenantId: principal.TenantId)
+        .Select(t => GuideService.NextScreenHint(guide.BusinessObject, t));
+    guide = guide with { NextHints = guide.NextHints.Concat(next).ToList() };
+
+    var added = suggestions.RecordImpressions(
+        principal.UserId, req.ObservationId, rec.Entry.Signature,
+        guide.BusinessObject, guide.NextHints, DateTimeOffset.UtcNow);
+    return Results.Ok(new { observation_id = req.ObservationId, added });
+});
+
 app.MapPost("/v1/suggestions/feedback",
     (HttpRequest request, SuggestionFeedbackRequest req, SuggestionFeedbackStore suggestions) =>
 {
@@ -622,7 +771,22 @@ app.MapGet("/v1/suggestions", (SuggestionFeedbackStore suggestions, int? limit) 
 app.MapGet("/v1/decisions", (DecisionLog decisions, int? limit) =>
     Results.Ok(new { count = decisions.Count, entries = decisions.Snapshot(limit ?? 100) }));
 
+static IResult ObservationAccepted(StoredObservation rec, bool replayed) => Results.Ok(new
+{
+    observation_id = rec.ObservationId,
+    signature = rec.Entry.Signature,
+    status = "accepted",
+    replayed,
+    cache_hit = rec.CacheHit,
+    source = rec.Source,
+    business_object = rec.Entry.BusinessObject,
+    confidence = rec.Entry.Confidence,
+});
+
 app.Run();
 
 // 통합 테스트에서 WebApplicationFactory로 참조하기 위한 partial 선언.
 public partial class Program { }
+
+public sealed record SuggestionImpressionRequest(string ObservationId);
+public sealed record FeedbackReviewDecision(bool Approve);

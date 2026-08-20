@@ -3,9 +3,9 @@
 > Enterprise Work Intelligence Platform
 > **Screen을 이해하는 AI를 넘어 Business를 이해하는 AI**
 
-Version : 1.0 (Architecture)
-Status : Design
-연계 문서 : [Proposal Draft.md](Proposal%20Draft.md) v1.1
+Version : 1.3 (Architecture)
+Status : Design + Phase 1 baseline implemented
+연계 문서 : [Proposal Draft.md](Proposal%20Draft.md) v1.3
 
 ---
 
@@ -18,6 +18,8 @@ Status : Design
 | D3 | **1차 타깃 애플리케이션** | **자체 개발 General Procurement 시스템**. 단 **소스 접근 불가 → 사용자 관점(외부) 관측만 허용** | 협조형(Tier 0) 불가. **Tier 1(UIA)** 로 관측. 사내 시스템이므로 **화면/필드 문서·테스트 환경·도메인 전문가** 확보는 가능(시드·검증용) |
 | D4 | **동적 환경 · AI 적응형 로직** | 테스트/운영 환경이 **동적으로 구성**되어 화면·필드가 고정적이지 않음. 따라서 매핑을 하드코딩하지 않고 **런타임에 내부 AI(Bedrock) 호출로 화면을 해석·적응** | 정적 규칙 우선 → **Adaptive Semantic Mapping(§5)**: AI가 접근성 트리를 해석해 매핑을 생성하고 **자가학습 캐시**에 적재, 화면 변경 시 **자동 재추론(self-healing)**. 대신 비용·지연·정확도 관리가 핵심(캐시·서명·신뢰도) |
 | D5 | **사용자별 환경·로직 축적 및 도출** | **사용자마다 환경(앱·화면·데이터·습관)과 로직을 축적**하고, 그 환경에 **맞는 로직을 도출**(개인화) | **2-Plane 지식 모델(§5.4)**: ① 구조 지식(화면→개념 매핑)은 전역/조직 공유(효율·콜드스타트) ② 개인 로직(워크플로 습관·엔티티 별칭·보정·선호)은 **사용자별 격리**. 도출은 **개인 > 조직 > 전역 캐스케이드** + 피드백 학습. 개인정보 격리(멀티테넌시) 필수 |
+| D6 | **변경 인지 관측·델타 기록** | UI 상태를 주기마다 전량 저장하지 않고 **변경 이벤트를 합쳐 의미 있는 변화만 기록**. 첫 관측·화면/구조 변경은 체크포인트, 동일 화면의 값·상태 변경은 델타 | VDI/UIA 부하·전송량·보관량을 줄이면서 시간 순서 복원 가능. 안정 노드 키, Privacy Gate 이후 비교, 기준 누락 시 전체 재동기화, 이벤트 멱등성이 필수(§3.4·§4.1) |
+| D7 | **사용자 검측·피드백 반영** | 운영 측정 콘솔과 최종 사용자 검측 UI를 분리한다. 사용자는 시스템이 이해한 결과와 불확실한 항목만 확인하고 `맞음·수정·나중에·개인정보 신고`로 응답한다 | 개인 보정은 즉시 개인 스코프에 적용하고, 조직 공유는 검수 후 승격한다. 모든 판단은 대상 관측·필드·버전·사유·적용 상태·되돌리기를 남긴다(§3.5·§4.4) |
 
 ### 0.1 D2가 만드는 제약과 대응
 1. **GPU 부재** → 로컬에서 OCR·임베딩·비전 모델 실행 비현실적. → **무거운 추론은 전량 서버(AWS GPU)로.** 클라이언트는 UIA 파싱 + 경량 규칙 기반 PII 필터만.
@@ -33,6 +35,8 @@ Status : Design
 3. **관측(Read)과 실행(Actuation/Write)을 분리.** 안전성·감사(Audit) 용이.
 4. **추론은 계층적(Tiered).** 규칙 → 임베딩/소형 → LLM 순으로 escalate. LLM은 모호한 소수 케이스의 판정자로만.
 5. **연결(Correlation)은 결정론 우선.** LLM에 3축 연결을 통째로 맡기지 않는다.
+6. **변화만 기록하되 복원 가능해야 한다.** 변경 없음은 버리고, 델타는 명시적 체크포인트와 순서 위에서만 적용한다. 최적화 때문에 감사 가능성을 잃지 않는다.
+7. **사용자 피드백은 명령이 아니라 검증된 결정이다.** 인증 주체·소유권·대상 버전·적용 범위를 확인하고, 개인 적용과 조직 지식 승격을 분리한다.
 
 ---
 
@@ -45,7 +49,8 @@ Status : Design
 │        ▲                                                                              │
 │        │ UI Automation / COM / FileSystemWatcher                                      │
 │   ┌────┴───────────────── Cho-Pilot Agent (.NET 8, 초경량) ──────────────────┐        │
-│   │  Observation Adapters → Local Privacy Gate → Event Buffer(durable) → gRPC/HTTPS│    │
+│   │  Observation Adapters → Privacy Gate → Change Detector/Delta Encoder           │    │
+│   │                                      → Event Buffer(durable) → gRPC/HTTPS        │    │
 │   └───────────────────────────────┬───────────────────────────────────────────┘      │
 └───────────────────────────────────┼───────────────────────────────────────────────── ┘
                                      │  VPC 내부 통신 (TLS, PrivateLink)
@@ -81,10 +86,12 @@ Status : Design
 ### 3.1 Client — Cho-Pilot Agent (.NET 8)
 | 컴포넌트 | 책임 | 기술 |
 |---------|------|------|
-| Web Adapter | **브라우저 접근성 트리(UIA)** 순회 → 정규화 UI 이벤트. **URL·화면 타이틀로 화면/레코드 식별** | `System.Windows.Automation` / FlaUI (Chrome·Edge 접근성 트리, Extension 불요) |
+| Web Adapter | **브라우저 접근성 트리(UIA)** 순회와 변경 이벤트 구독 → 정규화 UI 이벤트. 주소창 전용 식별자로 얻은 URL만 경로 단위로 정규화하고 query·fragment는 기본 제거 | `System.Windows.Automation` / FlaUI (Chrome·Edge 접근성 트리, Extension 불요) |
+| Change Listener | `FocusChanged`·`StructureChanged`·`PropertyChanged`·`Invoke` 수신, 디바운스·최대 대기·노이즈 제거 | UIA 이벤트 + 앱별 폴링 안전망 |
 | Mail Adapter | 메일 이벤트 | **Graph API 우선**, Outlook COM fallback |
 | Doc Adapter | 파일 변경 감지, 메타데이터 | `FileSystemWatcher` |
-| **Local Privacy Gate** | 전송 전 PII 탐지·마스킹·정책 필터 | 정규식/사전 기반(경량, GPU 불요) |
+| **Local Privacy Gate** | 전송 전 `value`뿐 아니라 `name·title·url·record hint`를 포함한 전체 문자열과 메타데이터의 PII 탐지·마스킹·차단 | 정규식/사전 기반 + 송신 직전 잔여 민감정보 검사(경량, GPU 불요) |
+| State Cache / Delta Encoder | Privacy Gate를 통과한 직전 상태 유지, 안정 노드 키 기반 체크포인트·델타 생성 | 메모리 + 로컬 SQLite 체크포인트 |
 | Event Buffer | 정규화 이벤트 큐, 오프라인·재시도 | 인메모리 + **durable 로컬 스풀**(영속 VDI, 재부팅 내성) |
 | Local Cache | 최근 컨텍스트·매핑 규칙 사본(읽기용) | 로컬 SQLite. 원본은 서버 |
 | Uploader | 서버 전송 | gRPC(우선)/HTTPS, mTLS |
@@ -94,17 +101,21 @@ Status : Design
 ### 3.2 Server
 | 서비스 | 책임 |
 |--------|------|
-| Ingestion | 이벤트 수신·검증·정규화, 서버측 OCR/임베딩 오케스트레이션 |
+| Ingestion | 이벤트 수신·검증·정규화, `event_id` 멱등 처리, 서버측 OCR/임베딩 오케스트레이션 |
+| Observation State Store | 체크포인트+델타 순서 검증·원자 적용·현재 상태 재구성, 기준 누락 시 재동기화 요청 |
 | Semantic Engine | UI 이벤트 → **Business Object** 변환 (**Adaptive Semantic Mapping**, §5) |
 | App Adapter Registry | **자가학습 매핑 캐시(Shared Structural Plane)** — 화면 서명별 AI 도출 매핑, 신뢰도·검수상태, 스코프(Global/Org), 화면 변경 시 자동 무효화 |
 | **User Environment Profile (UEP)** | **사용자별 환경·로직 축적(Personal Plane, §5.4)** — 화면 사용 빈도, 개인 엔티티 별칭, 워크플로 습관, 선호·보정 이력. 사용자별 격리 |
 | **Personalization / Derivation** | 개인 ▷ 조직 ▷ 전역 캐스케이드로 환경 맞춤 로직 도출 + 피드백 학습 |
+| **Review Task / Feedback** | 저신뢰·표본 검측 과제 생성, 필드 단위 피드백 검증, 개인 즉시 적용, 조직 검수 큐·되돌리기·적용 영수증 |
 | **Entity Resolver** | 3축 연결(§6) |
 | Knowledge Graph | 업무 엔티티·관계 저장(§4) |
 | Vector Store | 메일/문서 청크 임베딩, Semantic Search |
 | Business Understanding | 3축 융합 → 현재업무/목적/진행률/다음작업 |
 | Workflow Engine | Guide→Validation→승인→Automation→Audit(§7) |
 | LLM Gateway | Bedrock 라우팅, 토큰/비용 관리, 프롬프트 캐시, 모델 추상화. **모델 ID는 inference profile(us./global.) 사용** — 현재 Anthropic 모델은 ON_DEMAND 직접 호출 미지원(PoC 실측) |
+| **User Review UI** | 최종 사용자에게 자신의 검측 과제와 반영 결과만 제공. 내부 서명·임계치·캐시 상태는 숨기고 원문 라벨↔해석 개념·근거·신뢰도만 설명 |
+| **Operations Console** | 관측·비용·지식·저장소·감사 상태를 운영자에게 제공. 최종 사용자 UI와 경로·권한을 분리 |
 
 ### 3.3 Observation Tiers — 협조 수준별 관측 (D3 반영)
 
@@ -120,6 +131,80 @@ Status : Design
 >
 > **완충 요소(시드·검증용):** 사내 시스템이므로 **화면·필드 명세 문서·테스트 환경·도메인 전문가**를 확보해 AI 매핑의 few-shot 시드와 검수 기준으로 활용한다. (단, 화면이 동적이므로 문서는 초기 시드일 뿐 최종 규칙이 아님)
 
+### 3.4 Change-aware Observation Pipeline (D6)
+
+기본 캡처 단위는 픽셀 이미지가 아니라 **정규화된 접근성 트리 상태**다. 현재 Phase 1 구현은
+일정 간격으로 전체 트리를 읽은 뒤 값 포함 지문을 직전 상태와 비교해 변경 없음을 전송하지 않는다.
+목표 구조는 UIA 이벤트로 캡처 시점을 좁히고, 동일 화면 안의 변화는 델타만 보내는 것이다.
+
+```
+UIA event ─▶ debounce/coalesce ─▶ affected tree capture ─▶ Privacy Gate
+                                                        │
+                                                        ▼
+                                              stable node-key diff
+                                                        │
+                          ┌─────────────────────────────┼─────────────────────────┐
+                          ▼                             ▼                         ▼
+                    no semantic change            value/state delta       route/structure change
+                         drop                   append delta event         new checkpoint
+```
+
+**트리거와 합치기 정책.** UIA는 한 번의 사용자 입력에도 여러 이벤트를 낸다. 일반 값·구조 이벤트는
+마지막 이벤트 후 기본 750ms에 한 번 처리하고, 입력이 계속돼도 최대 3초마다 중간 상태를 한 번만
+남긴다. `Invoke(save|submit|approve)`와 화면 전환은 즉시 처리한다. 이벤트 유실·앱별 UIA 품질 편차를
+복구하기 위해 30~60초 간격의 저빈도 전체 확인을 병행하며, 앱별 실측으로 값을 조정한다.
+
+**의미 없는 변화.** 포커스·커서·선택·스크롤 위치·로딩 애니메이션·현재 시각·반복 live region은
+업무 의미가 없으면 저장하지 않는다. 매핑된 업무 필드, 검증 오류, 버튼 동작, 업무 상태 변화는
+우선 보존한다. 필터 규칙의 변경은 관측 정책 버전으로 남겨 측정 기준이 중간에 바뀌었음을 알 수 있게 한다.
+
+**안정 노드 키.** 현재 캡처 순서에서 파생된 `n1`, `n2`는 앞 노드 하나가 추가되면 뒤 키가 전부
+밀리므로 델타 키로 쓰지 않는다. 다음 캐스케이드를 사용한다.
+
+1. 앱이 제공하는 안정 `AutomationId`
+2. `parentKey + Role + AutomationId`
+3. `parentKey + Role + normalized Name`
+4. 마지막 수단으로 정규화된 구조 경로
+
+반복 테이블의 행 번호처럼 데이터에 따라 바뀌는 숫자는 키에서 정규화한다. 업무 레코드 키가
+관측됐을 때만 행 식별자로 승격하며, 충돌이 감지되면 부분 델타 대신 전체 체크포인트로 폴백한다.
+
+**체크포인트 생성 조건.** 세션 첫 관측, 앱 재접속, route/레코드 전환, 구조 서명 변경,
+Privacy/관측 정책 버전 변경, 기준 이후 델타 50건 또는 10분 경과, 서버의 재동기화 요청에서
+전체 체크포인트를 생성한다. 임계치는 초기값이며 §9 KPI로 조정한다.
+
+**실패와 순서.** 로컬 스풀은 체크포인트와 종속 델타를 FIFO로 전송한다. 서버는 `(session_id,
+sequence)`의 연속성과 `base_snapshot_id`를 확인해 상태 적용과 이벤트 기록을 원자적으로 수행한다.
+같은 `event_id` 재전송은 성공 응답을 재사용하고 파생 통계를 다시 누적하지 않는다. 기준이 없거나
+순서가 비면 `resync_required`를 반환하고, 클라이언트는 같은 델타를 무한 재시도하지 않고 새
+체크포인트를 보낸다.
+
+### 3.5 User Review & Feedback Pipeline (D7)
+
+검측은 전체 화면을 다시 묻는 절차가 아니라 **틀릴 가능성이 큰 필드만 짧게 확인하는 작업함**이다.
+저신뢰 항목을 우선 배치하고, 고신뢰 결과도 1~5%를 무작위 표본으로 넣어 시스템이 놓친 오류를
+측정한다. 같은 사용자에게 반복 질문하지 않도록 일 단위 예산과 묶음 검측을 적용한다.
+
+```
+Observation/Guide ─▶ Review Task ─▶ User Review UI ─▶ Feedback Service
+                          │                                  │
+                    low confidence / sample                  ├─ personal ─▶ 즉시 보정 + undo
+                                                             └─ org/global ─▶ reviewer queue
+                                                                                 │
+                                                    Mapping/Knowledge revision ◀─┘
+                                                                 │
+                                                    적용 영수증 + Audit/Decision
+```
+
+사용자에게는 `시스템이 이해한 항목`, 원래 화면 라벨, 해석된 업무 개념, 불확실한 이유만 보여 준다.
+기본 동작은 **“나머지는 맞아요”**, **“틀린 항목 고치기”**, **“나중에”** 세 가지이며, 자유문보다
+구조화된 사유 코드를 먼저 받는다. 개인정보로 보이는 값은 별도 `privacy_report`로 즉시 차단·조사한다.
+
+Feedback Service는 인증 주체에서 tenant/user를 정하고 본문의 사용자를 신뢰하지 않는다. 대상
+관측의 소유권, `element_key` 존재 여부, 기대 매핑·지식 버전, 스코프 권한, 멱등 키를 검증한다.
+개인 수정은 현재 사용자에게 즉시 적용하되 조직·전역 지식은 검수자의 승인 없이는 게시하지 않는다.
+버전 충돌은 마지막 쓰기로 덮지 않고 최신 해석과 함께 `409 conflict`를 반환한다.
+
 ---
 
 ## 4. 데이터 모델
@@ -129,15 +214,47 @@ Status : Design
 {
   "event_id": "uuid",
   "session_id": "vdi-session-uuid",
-  "user_id": "hashed-user-id",
+  "device_id": "managed-device-id",
   "source": "web | mail | doc",
   "captured_at": "ISO-8601",
-  "trigger": "focus_changed | structure_changed | save_clicked | null",  // 예약 — 완료 신호(§11)
+  "trigger": "focus_changed | structure_changed | property_changed | save_clicked | null",
+  "event_kind": "checkpoint | delta | fact",  // web 상태는 앞의 둘, mail/doc 단건은 fact
+  "sequence": 42,
+  "base_snapshot_id": "uuid | null",
+  "screen_signature": "sha256:...",       // route + 구조, 매핑 캐시 키
+  "content_fingerprint": "sha256:...",    // Privacy Gate 이후 의미 있는 값
   "app": { "name": "SAP GUI", "window_title": "...", "screen_id": "ME51N" },
-  "payload": { /* source별 정규화 구조 */ },
+  "payload": { /* checkpoint.tree 또는 delta.changes */ },
   "privacy": { "masked_fields": ["..."], "policy_version": "1.3" }
 }
 ```
+
+`tenant_id`와 `user_id`는 이벤트 본문에서 받지 않고 인증 토큰의 검증된 claim으로 서버가 부여한다.
+클라이언트가 보내는 `device_id`도 신원 자체가 아니라 등록된 장치와 세션을 추적하는 보조 키다.
+
+Web 관측의 `checkpoint`는 전체 정규화 트리를, `delta`는 기준 체크포인트 이후의 변경 연산만 담는다.
+
+```jsonc
+{
+  "event_kind": "delta",
+  "base_snapshot_id": "snap-100",
+  "sequence": 43,
+  "payload": {
+    "changes": [
+      { "op": "replace", "node_key": "form/item/quantity", "property": "value", "value": "20" },
+      { "op": "replace", "node_key": "form/vendor", "property": "value", "value": "***MASKED***" }
+    ]
+  }
+}
+```
+
+초기 연산은 `add | remove | replace`만 지원한다. `old_value`는 저장하지 않는다 — 기준 상태에 이미
+있고 민감 원문을 중복 보유할 이유가 없다. 델타 비교·지문·직렬화는 모두 **Privacy Gate 이후**에
+수행한다. `block` 필드는 값 없이 `present/empty`만, `mask` 필드는 마스킹 토큰과 채움 여부만 남긴다.
+
+서버가 의미 상태를 재구성하는 규칙은 결정적이어야 한다. `checkpoint + sequence 순 델타`를 접고,
+중복 `event_id`는 무시하며, 기준 누락·순서 공백·노드 키 충돌 시 추측 적용하지 않고 전체
+재동기화를 요구한다. 이렇게 재구성한 현재 상태가 Semantic Engine과 Guide의 입력이다.
 
 ### 4.2 Business Object (Semantic Engine 산출)
 ```jsonc
@@ -165,6 +282,27 @@ ERPRecord ─about─ Company        // "협력사코드 00231" ↔ "A사"
 KnowledgeDoc ─about─ (Concept | Screen | Company | ...)   // §5.4 Plane 3 문서의 대상 연결
 ```
 > **초기 저장소:** Aurora PostgreSQL(관계형 + 재귀 CTE)로 시작. 그래프 순회 부하가 커지면 Neptune/Neo4j로 이관. **그래프 "모델"이 자산이지 DB 엔진이 아니다.**
+
+### 4.4 사용자 피드백 계약
+
+기존의 화면 서명 전체 교체 요청 대신, 한 관측의 한 필드를 대상으로 하는 버전 조건부 명령을 쓴다.
+
+```jsonc
+{
+  "feedback_id": "uuid",                 // 멱등 키
+  "observation_id": "uuid",
+  "target": { "type": "mapping", "element_key": "form/item/quantity" },
+  "decision": "accept | correct | defer | privacy_report",
+  "reason_code": "wrong_concept | missing_field | wrong_context | privacy",
+  "proposed": { "concept": "Quantity" },
+  "requested_scope": "personal | org",
+  "expected": { "mapping_revision": 3, "knowledge_version": 12 }
+}
+```
+
+응답은 `applied_personal | pending_org_review | conflict | rejected` 상태, 실제 적용 버전과 시각,
+`review_id`, `undo_until`을 반환한다. 제출·검수·승격·되돌리기는 하나의 `feedback_id` 계보로 연결하고,
+같은 요청을 재전송해도 보정·통계를 한 번만 반영한다.
 
 ---
 
@@ -416,7 +554,7 @@ Guide → Validation(Dry-run) → [Human Approval] → Automation → Verify(Vis
 | 전송 경계 | 모든 데이터 **테넌트 VPC 내부**. Bedrock은 VPC Endpoint 경유, 인터넷 미경유 |
 | LLM 데이터 | Bedrock 무학습 정책 근거. 프롬프트/응답 로그 보존기간 명시·암호화 |
 | 저장 | S3/Aurora **SSE-KMS 암호화(고객 관리 키)**, 전송 TLS/mTLS |
-| 최소수집 | Privacy Gate에서 PII 마스킹·화이트리스트 필드만 승격 |
+| 최소수집 | Privacy Gate에서 값·이름·제목·URL 등 전체 문자열과 메타데이터를 검사하고 화이트리스트 필드만 승격. 변경 없음은 폐기하고 동일 화면은 델타 우선 |
 | 동의/투명성 | 관측 대상·범위 사용자 고지 UX, on/off 및 앱별 제외 목록 |
 | 보존/파기 | 이벤트·임베딩·원본별 보존기간(TTL), 사용자 삭제 요청 처리 경로 |
 | 접근통제 | IAM 최소권한, **사용자별 데이터 격리(필수, D5)** — Personal Plane(§5.4)은 사용자 간 격리, Shared Plane 승격은 사적정보 제거 후에만 |
@@ -448,6 +586,22 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 클라이언트가 고칠 것도 본문이 아니다. 검증 실패(위조·만료·발급자 불일치)는 예외로 새어
 나가지 않는다: 만료된 토큰 하나가 500을 만들면 클라이언트 스풀이 그것을 서버 장애로 읽는다.
 
+### 8.2 권한·소유권 경계
+
+인증은 “누구인가”만 답한다. 각 API는 다음 역할과 리소스 소유권을 별도로 확인한다.
+
+| 역할 | 허용 범위 |
+|------|-----------|
+| `ingestion_client` | 자신의 등록 장치에서 이벤트 제출. 감사·관측 조회 불가 |
+| `end_user` | 자신의 Review Task·관측 요약 조회, 개인 피드백 제출·되돌리기 |
+| `reviewer` | 조직 범위 매핑/피드백 검수. 자신이 제출한 조직·전역 초안의 자기 승인 금지 |
+| `knowledge_admin` | 지식 게시·폐기·기반 출처 관리. 모든 변경은 사유와 버전 필수 |
+| `ops_auditor` | 메트릭·감사·저장소 상태 읽기. 업무 원문은 별도 최소권한 |
+
+라우트는 `/v1/me/*`, `/v1/reviews/*`, `/v1/admin/*`, `/v1/ingestion/*` 그룹으로 분리하고 정책을
+기본 거부(default deny)로 적용한다. 관측 상세와 가이드도 소유권을 확인하며, GET은 노출 통계를
+변경하지 않는다. 실제 화면 노출 시 별도 멱등 `impression` 명령을 기록한다.
+
 ---
 
 ## 9. 관측 지표 (KPI) — 제안서에 없던 성공 정의
@@ -455,11 +609,20 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 | 지표 | 정의 | 목표(초기) | 산출 |
 |------|------|-----------|------|
 | 관측 정확도 | UIA→Business Object 필드 정확 매핑률 | ≥ 90% | 수기 채점 |
+| **변경 없음 억제율** | 후보 관측 중 의미 변화가 없어 저장·전송하지 않은 비율 | ≥ 95% (정적 화면) | 클라이언트 회차 통계 |
+| **전송량 절감률** | 전체 스냅숏만 보낼 때 대비 체크포인트+델타 바이트 감소 | ≥ 70% | 업로더 바이트 계측 |
+| **상태 재구성 성공률** | 수신 체크포인트+델타를 순서대로 접어 기대 상태와 일치한 비율 | 100% | 재생/무결성 테스트 |
+| **변경 관측 지연** | UIA 변경 발생→서버 수신 p95(저빈도 안전망 제외) | ≤ 2s | 이벤트 시각·수신 시각 |
 | **AI 매핑 정확도** | 캐시 미스 시 AI 동적 매핑 정확률 | ≥ 90% | 수기 채점 |
 | **매핑 캐시 적중률** | 정상 상태 캐시 HIT 비율(AI 미호출) | ≥ 95% | `/v1/metrics.cacheHitRatio` |
 | **화면 변경 자가치유** | 화면 변경 감지→재추론 성공률 | ≥ 95% | 서명 변경 후 `source=ai` |
 | **개인화 수렴** | 웜스타트(개인축적 후) vs 콜드스타트 정확도·수락률 개선폭 | 유의미 향상 | `/v1/suggestions` 시계열 |
 | **제안 수락률** | 도출 로직(다음작업/자동화) 사용자 수락 비율 | 상승 추세 | `/v1/suggestions.acceptanceRate` |
+| **검측 완료 시간** | Review Task 노출→사용자 결정 p50/p95 | p50 ≤ 20s | Feedback 이벤트 |
+| **검측 조작 수** | 한 과제 확인·수정에 필요한 클릭/입력 수 | 확인 ≤ 1, 수정 ≤ 3 | UI telemetry |
+| **피드백 반영 지연** | 개인 보정 제출→다음 해석에 적용되는 시간 p95 | ≤ 5s | revision/effective timestamp |
+| **공유 승격 정밀도** | 조직 승격본 중 재검수에서 유지된 비율 | ≥ 95% | review decision |
+| **고신뢰 표본 오류율** | 고신뢰 무작위 표본 중 사용자 수정 비율 | 하락 추세 | sampled review task |
 | **지식 초안 승인률** | 관측에서 생성된 지식 초안 중 사람이 승인한 비율(§5.5) | 상승 추세 | `/v1/knowledge` 집계 |
 | **온톨로지 성장** | 게시된 개념·규칙 수와 버전 (배포 없이 성장하는가) | 증가 | `/v1/knowledge.version` |
 | 연결 정밀도 | Entity Resolver 정탐/오탐 | Precision ≥ 0.9 | 미구현 |
@@ -482,12 +645,14 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 
 ## 10. 실행 로드맵 (위험 제거형)
 
-제안서의 Web→Mail→Doc→BUL 순서는 최난도(융합·거버넌스)를 뒤로 미룹니다. **Phase 0로 핵심 위험을 선검증**합니다.
+제안서의 Web→Mail→Doc→BUL 순서는 최난도(융합·거버넌스)를 뒤로 미룬다. 코드 리뷰에서 확인한
+신뢰 경계와 멱등성 문제를 먼저 닫은 뒤 **Phase 0로 핵심 제품 가정을 선검증**한다.
 
 | Phase | 목표 | 검증/산출 |
 |-------|------|-----------|
+| **-1. 신뢰 경계 안정화 (1~2 sprint)** | 인증 주체 강제, 역할·소유권, 전체 Privacy Envelope, 원자적 멱등 ingestion, 입력 한도 | P0 보안/재전송 테스트 전부 통과. 이 단계 전에는 운영 데이터 사용 금지 |
 | **0. 위험 검증 (4~6주)** | **자체 Procurement** 대상 ① **UIA 관측 정확도 실측** ② **Adaptive Mapping**(AI 동적매핑·캐시·자가치유) PoC ③ Privacy Gate ④ Entity Resolver 결정론 매칭 | "UIA로 안 읽히거나 AI 동적매핑이 성립 안 하면 무의미"한 가정 검증 |
-| **1. Web Agent + Guide(읽기전용)** | 자체 Procurement에서 "현재 업무 이해 + 가이드" | Tier 1 UIA·Adaptive Mapping·Registry |
+| **1. Web Agent + Guide + Review** | 자체 Procurement에서 "현재 업무 이해 + 가이드 + 빠른 검측" | Tier 1 UIA·Adaptive Mapping·Registry, 사용자 Review UI·개인 보정, 이후 안정 키 기반 체크포인트/델타와 UIA 이벤트 구독 |
 | **2. Mail + Doc 수집·인덱싱** | Graph 수집, Office/PDF 파싱, KG·Vector 적재 | Knowledge Graph v1 |
 | **3. Business Understanding** | 3축 융합, 진행률/다음작업 | Entity Resolver 3단, BUL |
 | **4. Workflow Automation** | 승인형 → 단계적 자동화 | 안전장치·Audit·Kill Switch |
@@ -497,7 +662,7 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 ---
 
 ## 11. 미해결/후속 결정 사항
-- ~~자체 Procurement의 형태~~ → **확정: 웹앱**. 브라우저(Chrome/Edge) 접근성 트리로 UIA 접근, URL을 레코드 식별 신호로 활용
+- ~~자체 Procurement의 형태~~ → **확정: 웹앱**. 브라우저(Chrome/Edge) 접근성 트리로 UIA 접근, Privacy Gate를 통과한 정규화 URL 경로만 화면·레코드 식별의 보조 신호로 활용
 - **완충 자원 확보** — 화면/필드 명세 문서, 비운영 테스트 환경, 도메인 전문가 접근 가능 여부
 - **브라우저 표준** — 사내 표준 브라우저(Chrome/Edge) 및 버전, 접근성 트리 노출 정책 확인
 - VDI 구체 형상(AWS WorkSpaces vs 사내 VDI) — 네트워크 경로 상세
@@ -506,8 +671,11 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 - ~~멀티테넌시 필요 여부~~ → **확정: 사용자별 격리 필수(D5)**. 남은 결정은 격리 입도(사용자/부서/법인)와 Shared Plane 승격 정책·검수 주체
 - 개인화 레이어 저장 위치(UEP 스키마: Aurora vs 별도 스토어)와 피드백 신호 보존기간
 - **지식 문서 저장소**(§5.4 Plane 3) — PoC는 코드 시드 + 저널(§12), 운영은 Aurora(버전·감사 이력 포함) 예정. 지식 초안 생성기(축별 집계·LLM 편집자)의 실행 주기와 비용 상한
-- **작업 완료 신호** — 서버 경로는 구현됨(§5.7). 남은 결정은 <b>저장 클릭 자체를 어떻게 관측할지</b>다. `chopilot-dump --watch`는 간격 기반 폴링이라 클릭을 볼 수 없어 `--completed`로 사람이 표시한다. Phase 2 후보: UIA `Invoke` 이벤트 구독 vs 전이 기반 추정(폼 화면 → 목록 화면 이동을 완료로 간주). 후자는 `ChangeDetector`가 이미 화면 전이를 보고 있으므로 판정만 얹으면 되지만, 추정을 사실로 기록하는 셈이라 오탐이 필수 필드 규칙을 오염시킨다 — 근거 없이 켜서는 안 된다
-- **반복 관측의 간격** — 현재는 사람이 정한다(기본 10초). 화면 전환 빈도에 맞춰 자동 조절할지, 아니면 UIA 이벤트 구독으로 폴링 자체를 없앨지는 Phase 2 결정
+- **작업 완료 신호** — 서버 경로는 구현됨(§5.7). 목표는 §3.4의 UIA `Invoke` 이벤트에서 저장·제출 버튼을 식별하는 것이다. 앱별 이벤트 신뢰도가 검증되기 전에는 `--completed` 수동 표시를 유지한다. 폼→목록 전이 추정은 오탐이 필수 필드 규칙을 오염시키므로 보조 증거로만 사용한다
+- **변경 관측 임계치** — 디바운스 750ms·최대 대기 3초·안전망 30~60초·체크포인트 50건/10분은 초기값이다. 앱별 이벤트 폭주·누락률과 §9 KPI를 측정해 확정한다
+- **안정 노드 키 충돌 정책** — 반복 테이블·가상화 목록에서 `AutomationId`가 재사용될 때 레코드 키를 어디까지 결합할지 Phase 1 실측으로 결정한다. 불확실하면 델타가 아니라 체크포인트로 폴백한다
+- **검측 방해 예산** — 사용자·업무별 일 최대 질문 수와 고신뢰 표본률(초기 1~5%)을 실측으로 확정한다
+- **조직 검수 주체와 SLA** — `reviewer` 지정 방식, 개인 보정의 조직 승격 기준, 미처리 초안 만료기간을 확정한다
 
 ---
 
@@ -524,11 +692,22 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 
 | 저장소 | 남기는 것 | 이유 |
 |---|---|---|
-| 매핑 캐시 · 관측 · 제안 판단 | **결과 레코드** | 키가 레코드에서 유도돼 마지막 쓰기가 이긴다(로그 구조 저장소) |
+| 매핑 캐시 · 제안 판단 | **결과 레코드** | 키가 레코드에서 유도돼 마지막 쓰기가 이긴다(로그 구조 저장소) |
+| 관측 | **체크포인트 + 순서 있는 델타** | 현재 상태를 복원하면서 동일 화면의 전체 트리 중복 저장을 피한다. `event_id`는 멱등 키다 |
 | 감사 · 결정 · 미지 개념 · 완료 신호 | **결과 레코드** | 원래 추가 전용이다 |
 | UEP · 엔티티 | **입력** | 상태가 입력의 접기 결과다. 접는 규칙(세션 단절 기준 등)이 바뀌면 예전 관측이 새 규칙으로 다시 접힌다 |
 | 지식 | **연산**(제출·승인·폐기) | 승인·폐기는 대기본을 <b>지우는</b> 부수효과가 있어 문서만 봐서는 복원되지 않는다 |
 | 기반 마스터 | **남기지 않는다** | 외부 출처에서 다시 받는 것이 맞다. 관측 파생물을 마스터로 굳히면 계보가 뒤집힌다(§5.6) |
+
+**관측 압축과 보존.** 운영 저장소는 체크포인트와 그 이후 델타를 하나의 복원 단위로 다룬다.
+새 체크포인트가 확정되면 이전 체크포인트+델타를 접어 압축할 수 있다. 원시 UI 상태는 짧은 TTL을,
+Business Object·완료 증거·감사 결정은 목적별 장기 보존정책을 적용한다. 기준 체크포인트만 먼저
+삭제해 고아 델타를 만들지 않으며, 파기·사용자 삭제도 복원 단위 전체에 원자적으로 적용한다.
+
+PoC의 현재 JSON Lines 관측 저널은 전체 결과 레코드를 저장한다. 체크포인트/델타 계약이 구현되면
+같은 `IJournal` 경계 안에서 이벤트 종류를 확장하고, 복원 시 `sequence` 공백·중복·손상 건수를
+별도로 보고한다. 최적화 전후를 비교할 수 있도록 전체 스냅숏 바이트, 실제 전송 바이트,
+체크포인트/델타 건수도 운영 지표로 남긴다.
 
 **지식 버전은 되감기지 않는다.** 복원 시 게시·폐기 횟수만큼 올린다 — 되감기면 저신뢰 매핑의
 재추론 백오프가 "온톨로지가 바뀌었다"고 오인해 캐시가 통째로 무효화된다(§5.5 7단계).
@@ -543,3 +722,47 @@ Development를 선언해 이 방어선에 걸리지 않는다. 배포된 컨테�
 **영속화는 선택이다.** `Storage:Path`를 주지 않으면 지금까지와 똑같이 인메모리로 돈다.
 테스트와 CI가 디스크를 건드리지 않는 이유이고, 콘솔 상단 배지가 어느 쪽인지 항상 보여 준다.
 운영은 여전히 Aurora/DynamoDB(§11)이며, 저널은 그 저장소 인터페이스를 미리 갈라 둔 자리다.
+
+---
+
+## 13. 코드 리뷰 기준 보완 계획 및 이행 상태 (2026-08-20)
+
+### 13.1 검토 범위와 검증 상태
+
+Core·Mapping·Server·Windows Client, 정적 Web UI, 테스트, 설정을 함께 검토했다. .NET 8 런타임에서
+서버·코어·매핑 테스트 **325건이 모두 통과**했고, `net8.0-windows` Client는 Windows targeting 빌드에서
+경고 0·오류 0을 확인했다. 로컬 서버에서 Review UI의 과제 조회 → 수정 제출 → 개인 반영 → 완료 상태를
+브라우저로 검증했다. 실제 Windows VDI의 UIA 이벤트 구독·접근성 트리 품질·재시작 복구는 별도 E2E/장애
+주입 검증 대상이며, 이 문서에서 완료로 표기하지 않는다.
+
+### 13.2 우선순위별 발견 사항
+
+| 우선순위 | 발견 사항 | 이행 상태 | 남은 보완 |
+|---------|-----------|-----------|-----------|
+| **P0** | 본문 주체 위조·토큰 전달 부재 | **완료:** Bearer/tenant 전달, JWT subject와 본문 불일치 403 | OIDC/JWKS 키 회전으로 전환 |
+| **P0** | API 역할/소유권 경계 부족 | **완료:** JWT 기본 거부 RBAC, 관측·가이드·검수 ownership 분리 | 정책 엔진/권한 행렬 E2E |
+| **P0** | UIA 메타데이터 PII 유출 가능 | **완료:** 문자열 Privacy Envelope, 주소창 전용 URL, query/fragment 제거, 서버 잔여 스캔 | 정규식 사전 운영 튜닝 |
+| **P0** | 재전송 시 파생 통계 중복 | **완료:** tenant/user/event 단위 동시성 관문 및 replay 영수증, projection 멱등키 | DB 트랜잭션+outbox, 장애 주입 |
+| **P0** | 부분 저널 실패 일관성 | **PoC 완화:** projection 멱등 저널 | Aurora 단일 트랜잭션+outbox 전환 전에는 운영 보장 아님 |
+| **P1** | 동시 AI 중복·취소 전파·응답 검증 | **완료:** signature+ontology single-flight, 호출자 취소 분리, ref allowlist·confidence clamp·prompt budget | 모델 JSON schema/timeout·토큰 상한 강제 |
+| **P1** | 불안정한 노드 키와 변경 지문 | **부분 완료:** AutomationId+상위 경로 기반 안정 ref, 값 포함 변경 없음 억제 | 체크포인트/델타·UIA event 구독은 feature flag 단계 |
+| **P1** | 세션/스풀 순서와 용량 | **완료:** 실행별 UUID, monotonic spool sequence, quota/TTL/quarantine/status | 우선순위별 backpressure와 운영 telemetry |
+| **P1** | 피드백 정확성/조직 승격 | **완료:** Review Task, revision 검증, 개인 즉시/조직 검수, 자기 검수 차단, undo | 승인자 다수결·감사 조회 UI |
+| **P1** | 입력·전송 자원 상한 | **완료:** 크기/깊이/문자열/중복 ref/요청 크기/rate limit | tenant/user별 동적 quota |
+| **P2** | JSONL은 무한 증가·전량 복원·부분 쓰기 중심이고 compaction/checksum/fsync 정책이 없음 | `Core/JsonLineJournal.cs`, §12 저장소 | PoC rotation/snapshot/checksum, 운영 DB 이관·TTL·복구 훈련 |
+| **P2** | AWS SDK 버전이 floating이고 SDK/restore lock이 없어 재현성이 약함 | 프로젝트 파일·저장소 루트 | exact package version, `packages.lock.json`, `global.json`, 분석기/경고 정책 |
+| **P2** | 운영 콘솔이 사용자 검측까지 겸하며 새로고침마다 다수 API를 호출. CSP·rate limit·통합 오류 UX가 없음 | `wwwroot/index.html`, `wwwroot/app.js` | `/review`와 `/admin` 분리, 집계 endpoint/SSE, CSP·보안 헤더·접근성·오류 복구 |
+
+### 13.3 실행 순서와 완료 조건
+
+| 묶음 | 기간 기준 | 작업 | 완료 조건 |
+|------|-----------|------|-----------|
+| **A. P0 Gate** | **구현·회귀 통과** | 인증/인가·Privacy Envelope·멱등 ingestion·입력 상한 | 운영 DB outbox 및 장애 주입을 추가 완료 조건으로 둔다 |
+| **B. Feedback Correctness** | **구현·브라우저 스모크 통과** | Review Task/Feedback API, 개인/조직 workflow, 사용자 UI, revision/undo | 다중 승인·운영 감사 UI |
+| **C. Runtime Reliability** | **구현·회귀 통과** | AI single-flight/검증, 안정 키·세션 순서, spool quota, guide GET 부작용 제거 | 재시작·오프라인 Windows E2E |
+| **D. Production Hardening** | 2~3 sprint | 운영 DB/compaction, OIDC/JWKS·키 회전, rate limit/CSP, 의존성 고정, 관측성 | 부하·복구·권한 행렬·Windows UIA E2E·보존/삭제 시험 통과 |
+| **E. Change-aware rollout** | Phase 1 | UIA event, stable key, checkpoint/delta를 앱별 feature flag로 단계 적용 | §9 재구성 100%, 전송량 ≥70% 절감, 이벤트 누락 시 자동 resync, 앱별 rollback 가능 |
+
+**착수 규칙.** A를 통과하기 전 운영 사용자 데이터와 조직 공유 지식을 받지 않는다. D6 델타는
+멱등 ingestion과 안정 노드 키가 먼저 확보된 뒤 활성화한다. B의 개인 피드백은 빠르게 적용하되,
+조직·전역 승격은 역할 분리와 감사가 완성될 때까지 대기 상태만 허용한다.

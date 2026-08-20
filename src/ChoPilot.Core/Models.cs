@@ -80,7 +80,13 @@ public sealed record MappingEntry(
     /// 버전이 다르면 백오프와 무관하게 재추론한다 — "재추론이 의미 있는 건 온톨로지가
     /// 바뀐 뒤"라는 백오프의 전제를 실제 사건으로 연결하는 고리다. 기본 0(시드 이전).
     /// </summary>
-    int OntologyVersion = 0);
+    int OntologyVersion = 0,
+
+    /// <summary>사용자 피드백의 optimistic concurrency 기준.</summary>
+    int Revision = 1,
+
+    /// <summary>추가 전용 저널에서 personal 매핑 삭제를 복원하기 위한 tombstone.</summary>
+    bool Deleted = false);
 
 public sealed record FieldMapping(
     string ElementRef,

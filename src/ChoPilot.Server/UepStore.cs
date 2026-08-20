@@ -9,7 +9,8 @@ namespace ChoPilot.Server;
 /// 예전 관측이 새 규칙으로 다시 접힌다.
 /// </summary>
 public sealed record UepVisit(
-    string UserId, string Signature, DateTimeOffset At, string? Route, string? Title);
+    string UserId, string Signature, DateTimeOffset At, string? Route, string? Title,
+    string EventId = "", string TenantId = "default");
 
 /// <summary>
 /// User Environment Profile 저장소 (ARCHITECTURE §5.4 Personal Plane, PHASE1-DESIGN §5).
@@ -34,6 +35,8 @@ public sealed class UepStore
 
     private readonly TimeSpan _sessionGap;
     private readonly ConcurrentDictionary<string, UserState> _byUser = new();
+    private readonly HashSet<string> _events = new(StringComparer.Ordinal);
+    private readonly object _eventGate = new();
     private readonly IJournal<UepVisit> _journal;
 
     public UepStore() : this(DefaultSessionGap) { }
@@ -44,7 +47,11 @@ public sealed class UepStore
         _journal = (journals ?? NullJournalFactory.Instance).Open<UepVisit>("uep");
 
         // 저널은 시간순이다(추가 전용). 전이는 직전 화면에 의존하므로 순서가 곧 정확성이다.
-        foreach (var visit in _journal.Load()) Apply(visit);
+        foreach (var visit in _journal.Load())
+        {
+            Apply(visit);
+            if (visit.EventId.Length > 0) _events.Add(EventKey(visit));
+        }
     }
 
     public UepStore(IJournalFactory? journals) : this(DefaultSessionGap, journals) { }
@@ -58,18 +65,25 @@ public sealed class UepStore
     /// </para>
     /// </summary>
     public void RecordVisit(
-        string userId, string signature, DateTimeOffset at, string? route = null, string? title = null)
+        string userId, string signature, DateTimeOffset at, string? route = null, string? title = null,
+        string eventId = "", string tenantId = "default")
     {
-        var visit = new UepVisit(userId, signature, at, route, title);
-        Apply(visit);
-        _journal.Append(visit);
+        var visit = new UepVisit(userId, signature, at, route, title, eventId, tenantId);
+        lock (_eventGate)
+        {
+            var key = EventKey(visit);
+            if (eventId.Length > 0 && _events.Contains(key)) return;
+            _journal.Append(visit);
+            Apply(visit);
+            if (eventId.Length > 0) _events.Add(key);
+        }
     }
 
     /// <summary>접기 1회. 복원 경로가 저널에 다시 쓰지 않도록 기록과 분리돼 있다.</summary>
     private void Apply(UepVisit visit)
     {
-        var (userId, signature, at, route, title) = visit;
-        var state = _byUser.GetOrAdd(userId, _ => new UserState());
+        var (userId, signature, at, route, title, _, tenantId) = visit;
+        var state = _byUser.GetOrAdd(UserKey(tenantId, userId), _ => new UserState());
 
         // 방문 누적과 전이 기록은 "직전 화면"을 함께 읽고 쓴다 → 사용자 단위 직렬화.
         lock (state.Gate)
@@ -93,9 +107,9 @@ public sealed class UepStore
     }
 
     /// <summary>사용자 프로파일 조회. 사용 빈도 내림차순(자주 쓰는 화면 우선).</summary>
-    public UserEnvironmentProfile? Get(string userId)
+    public UserEnvironmentProfile? Get(string userId, string tenantId = "default")
     {
-        if (!_byUser.TryGetValue(userId, out var state)) return null;
+        if (!_byUser.TryGetValue(UserKey(tenantId, userId), out var state)) return null;
 
         lock (state.Gate)
         {
@@ -125,7 +139,7 @@ public sealed class UepStore
     /// </summary>
     public IReadOnlyList<UserEnvironmentProfile> AllProfiles() =>
         _byUser.Keys.OrderBy(k => k, StringComparer.Ordinal)
-            .Select(Get)
+            .Select(k => Get(UserFromKey(k), TenantFromKey(k)))
             .Where(p => p is not null)
             .Select(p => p!)
             .ToList();
@@ -135,9 +149,10 @@ public sealed class UepStore
     /// <paramref name="minCount"/> 미만은 근거가 얇아 제외한다.
     /// </summary>
     public IReadOnlyList<ScreenTransition> NextScreens(
-        string userId, string fromSignature, int limit = 3, int minCount = DefaultMinTransitionCount)
+        string userId, string fromSignature, int limit = 3, int minCount = DefaultMinTransitionCount,
+        string tenantId = "default")
     {
-        if (limit <= 0 || !_byUser.TryGetValue(userId, out var state))
+        if (limit <= 0 || !_byUser.TryGetValue(UserKey(tenantId, userId), out var state))
             return Array.Empty<ScreenTransition>();
 
         lock (state.Gate)
@@ -151,6 +166,12 @@ public sealed class UepStore
                 .ToList();
         }
     }
+
+    private static string UserKey(string tenantId, string userId) => $"{tenantId}\u001f{userId}";
+    private static string TenantFromKey(string key) => key.Split('\u001f', 2)[0];
+    private static string UserFromKey(string key) => key.Split('\u001f', 2)[1];
+    private static string EventKey(UepVisit visit) =>
+        $"{visit.TenantId}\u001f{visit.UserId}\u001f{visit.EventId}";
 
     /// <summary>직전 화면에서 지금 화면으로의 전이를 누적. 호출자가 <see cref="UserState.Gate"/>를 잡고 있어야 한다.</summary>
     private void RecordEdge(UserState state, string to, DateTimeOffset at, string? title)
