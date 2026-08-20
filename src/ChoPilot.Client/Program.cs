@@ -10,7 +10,7 @@ using Microsoft.Extensions.Configuration;
 // chopilot-dump — UIA 관측 도구 (PHASE0-PLAN WS2/WS3)
 //
 //   사용법:
-//     chopilot-dump [--out <파일>] [--delay <초>] [--baseline] [--bedrock]
+//     chopilot-dump [--out <파일>] [--delay <초>] [--baseline] [--bedrock|--vertex|--azure-openai]
 //                   [--upload [url]] [--spool-dir <경로>] [--completed]
 //                   [--watch [초]] [--rounds <n>] [--resend-unchanged]
 //
@@ -25,6 +25,8 @@ using Microsoft.Extensions.Configuration;
 //     3. ConsentPolicy(on/off·앱별 제외) → PrivacyGate(마스킹) → 화면 서명 계산
 //     4. --baseline : StubAiMapper(alias) 매핑 시도 (대조군)
 //        --bedrock  : Bedrock 동적 매핑 시도 (실 AI, appsettings 설정 사용)
+//        --vertex   : Google ADC로 Vertex AI Gemini 동적 매핑 시도
+//        --azure-openai : Azure OpenAI deployment 동적 매핑 시도
 //                     자동 모드에서는 첫 회차에만 돈다 — 매 회차 호출하면 비용이 시간에 비례한다
 //        --upload [url] : 서버로 POST 후 Guide 조회 (기본 Server:IngestionEndpoint)
 //                         전송 실패 시 durable 스풀에 적재, 다음 회차에서 재전송
@@ -156,7 +158,7 @@ async Task<ObservationRound> RoundAsync(CancellationToken ct)
         Console.Error.WriteLine($"[chopilot-dump] masked refs = {maskedRefs.Count}");
     }
 
-    // 대조군·Bedrock은 진단이다. 자동 모드에서 매 회차 돌리면 비용이 시간에 비례한다.
+    // 대조군·외부 LLM은 진단이다. 자동 모드에서 매 회차 돌리면 비용이 시간에 비례한다.
     if (captured == 1 || opts.Watch is null)
     {
         if (opts.Baseline) await RunMapper("baseline(stub)", new StubAiMapper(), maskedTree);
@@ -166,6 +168,23 @@ async Task<ObservationRound> RoundAsync(CancellationToken ct)
             var region = RegionEndpoint.GetBySystemName(cfg.Aws.Region);
             using var bedrock = new AmazonBedrockRuntimeClient(region);
             await RunMapper("bedrock(ai)", new BedrockAiMapper(bedrock, cfg.Aws.BedrockModelId), maskedTree);
+        }
+        if (opts.Vertex)
+        {
+            using var vertexHttp = NewLlmHttpClient(cfg.Llm.TimeoutSeconds);
+            Console.Error.WriteLine($"[chopilot-dump] Vertex AI: project={cfg.Llm.Vertex.ProjectId}, " +
+                $"location={cfg.Llm.Vertex.Location}, model={cfg.Llm.Vertex.Model} (ADC)");
+            await RunMapper("vertex(ai)", new CompletionClientAiMapper(new VertexAiCompletionClient(vertexHttp,
+                new VertexAiOptions(cfg.Llm.Vertex.ProjectId, cfg.Llm.Vertex.Location, cfg.Llm.Vertex.Model))), maskedTree);
+        }
+        if (opts.AzureOpenAi)
+        {
+            using var azureHttp = NewLlmHttpClient(cfg.Llm.TimeoutSeconds);
+            Console.Error.WriteLine($"[chopilot-dump] Azure OpenAI: endpoint={cfg.Llm.AzureOpenAI.Endpoint}, " +
+                $"deployment={cfg.Llm.AzureOpenAI.Deployment}");
+            await RunMapper("azure-openai(ai)", new CompletionClientAiMapper(new AzureOpenAiCompletionClient(azureHttp,
+                new AzureOpenAiOptions(cfg.Llm.AzureOpenAI.Endpoint, cfg.Llm.AzureOpenAI.Deployment,
+                    cfg.Llm.AzureOpenAI.ApiVersion, cfg.Llm.AzureOpenAI.ApiKey, cfg.Llm.AzureOpenAI.BearerToken))), maskedTree);
         }
     }
 
@@ -253,6 +272,11 @@ static async Task RunMapper(string label, IAiMapper mapper, UiNode tree)
     }
 }
 
+static HttpClient NewLlmHttpClient(int timeoutSeconds) => new()
+{
+    Timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds, 5, 300)),
+};
+
 static ChoPilotConfig LoadConfig()
 {
     var config = new ConfigurationBuilder()
@@ -281,6 +305,8 @@ static Options ParseArgs(string[] args)
             case "--delay" when i + 1 < args.Length: o.Delay = int.Parse(args[++i]); break;
             case "--baseline": o.Baseline = true; break;
             case "--bedrock": o.Bedrock = true; break;
+            case "--vertex": o.Vertex = true; break;
+            case "--azure-openai": o.AzureOpenAi = true; break;
             case "--upload":
                 o.Upload = true;
                 if (i + 1 < args.Length && !args[i + 1].StartsWith("--")) o.UploadUrl = args[++i];
@@ -311,6 +337,8 @@ sealed class Options
     public int Delay { get; set; } = 3;
     public bool Baseline { get; set; }
     public bool Bedrock { get; set; }
+    public bool Vertex { get; set; }
+    public bool AzureOpenAi { get; set; }
     public bool Upload { get; set; }
     public string? UploadUrl { get; set; }
     public string? SpoolDir { get; set; }

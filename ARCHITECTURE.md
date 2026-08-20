@@ -13,7 +13,7 @@ Status : Design + Phase 1 baseline implemented
 
 | # | 결정 | 내용 | 파급 |
 |---|------|------|------|
-| D1 | **LLM/추론 플랫폼** | **AWS 기반**. LLM = Amazon Bedrock(Claude), 임베딩 = Bedrock Titan/Cohere. 모든 데이터는 **테넌트 VPC 내부**에서만 이동 | 외부 전송 없음. Bedrock 무학습 정책 → 거버넌스 근거 확보 |
+| D1 | **LLM/추론 플랫폼** | 기본은 Amazon Bedrock(Claude)이며, tenant 승인 시 Vertex AI(Google ADC) 또는 Azure OpenAI deployment를 선택한다. 임베딩은 기존 Bedrock Titan/Cohere | 공급자 adapter가 같은 프롬프트·출력 검증을 공유한다. 교차 cloud 호출은 해당 리전·DLP·보존·egress 승인을 별도로 받아야 한다 |
 | D2 | **1차 타깃 환경** | **영속(persistent) VDI 세션 내부에서 동작하는 데스크톱 앱**. 사용자별 계정·프로파일 유지 | 세션 내부 실행 → **UIA 트리 정상 접근**(픽셀-only 문제 해소). 계정 유지 → **로컬 상태 신뢰 가능**. 단 GPU는 여전히 부재 |
 | D3 | **1차 타깃 애플리케이션** | **자체 개발 General Procurement 시스템**. 단 **소스 접근 불가 → 사용자 관점(외부) 관측만 허용** | 협조형(Tier 0) 불가. **Tier 1(UIA)** 로 관측. 사내 시스템이므로 **화면/필드 문서·테스트 환경·도메인 전문가** 확보는 가능(시드·검증용) |
 | D4 | **동적 환경 · AI 적응형 로직** | 테스트/운영 환경이 **동적으로 구성**되어 화면·필드가 고정적이지 않음. 따라서 매핑을 하드코딩하지 않고 **런타임에 내부 AI(Bedrock) 호출로 화면을 해석·적응** | 정적 규칙 우선 → **Adaptive Semantic Mapping(§5)**: AI가 접근성 트리를 해석해 매핑을 생성하고 **자가학습 캐시**에 적재, 화면 변경 시 **자동 재추론(self-healing)**. 대신 비용·지연·정확도 관리가 핵심(캐시·서명·신뢰도) |
@@ -113,7 +113,7 @@ Status : Design + Phase 1 baseline implemented
 | Vector Store | 메일/문서 청크 임베딩, Semantic Search |
 | Business Understanding | 3축 융합 → 현재업무/목적/진행률/다음작업 |
 | Workflow Engine | Guide→Validation→승인→Automation→Audit(§7) |
-| LLM Gateway | Bedrock 라우팅, 토큰/비용 관리, 프롬프트 캐시, 모델 추상화. **모델 ID는 inference profile(us./global.) 사용** — 현재 Anthropic 모델은 ON_DEMAND 직접 호출 미지원(PoC 실측) |
+| LLM Gateway | Bedrock·Vertex AI·Azure OpenAI 라우팅, 토큰/비용 관리, 프롬프트 캐시, 모델 추상화. Bedrock은 inference profile, Vertex는 ADC, Azure는 deployment endpoint를 사용 |
 | **User Review UI** | 최종 사용자에게 자신의 검측 과제와 반영 결과만 제공. 내부 서명·임계치·캐시 상태는 숨기고 원문 라벨↔해석 개념·근거·신뢰도만 설명 |
 | **Operations Console** | 관측·비용·지식·저장소·감사 상태를 운영자에게 제공. 최종 사용자 UI와 경로·권한을 분리 |
 
@@ -551,8 +551,8 @@ Guide → Validation(Dry-run) → [Human Approval] → Automation → Verify(Vis
 
 | 영역 | 정책 |
 |------|------|
-| 전송 경계 | 모든 데이터 **테넌트 VPC 내부**. Bedrock은 VPC Endpoint 경유, 인터넷 미경유 |
-| LLM 데이터 | Bedrock 무학습 정책 근거. 프롬프트/응답 로그 보존기간 명시·암호화 |
+| 전송 경계 | Bedrock은 테넌트 VPC Endpoint 경유·인터넷 미경유. Vertex/Azure 선택 시 승인된 project/resource·리전·private egress만 사용 |
+| LLM 데이터 | 공급자별 무학습·프롬프트/응답 보존 정책을 승인하고, 로그 보존기간·암호화를 명시 |
 | 저장 | S3/Aurora **SSE-KMS 암호화(고객 관리 키)**, 전송 TLS/mTLS |
 | 최소수집 | Privacy Gate에서 값·이름·제목·URL 등 전체 문자열과 메타데이터를 검사하고 화이트리스트 필드만 승격. 변경 없음은 폐기하고 동일 화면은 델타 우선 |
 | 동의/투명성 | 관측 대상·범위 사용자 고지 UX, on/off 및 앱별 제외 목록 |

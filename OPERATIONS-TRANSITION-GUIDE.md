@@ -101,6 +101,21 @@ Bedrock을 켤 때에는 별도의 IAM role에 필요한 Bedrock inference profi
 `UseBedrock=true`, `Aws__Region`, `Aws__BedrockModelId`를 추가한다. 모델 호출 비용과 개인정보
 경계를 승인받기 전에는 기본값(`false`)을 유지한다.
 
+### 4.3 Vertex AI / Azure OpenAI 공급자 전환
+
+LLM 공급자는 한 배포에서 하나만 선택한다. `Llm__Provider`를 명시하면 기존 `UseBedrock` 값은
+호환 fallback으로만 남고 선택에는 쓰이지 않는다.
+
+| Provider | 필수 설정 | 인증 경계 |
+|---|---|---|
+| `vertex` | `Llm__Vertex__ProjectId`, `Location`, `Model` | ADC: Workload Identity/런타임 service account 우선. 개발자 ADC는 개발 환경에만 |
+| `azure_openai` | `Llm__AzureOpenAI__Endpoint`, `Deployment`, `ApiVersion` | `ApiKey` 또는 단기 `BearerToken` 중 정확히 하나 |
+| `bedrock` | `Aws__Region`, `Aws__BedrockModelId` | IAM role/inference profile |
+
+Vertex/Azure로 프롬프트가 나가면 AWS VPC 내부 전송이라는 기존 가정은 성립하지 않는다. 해당 cloud
+project/resource의 리전, DLP·보존 정책, private endpoint/egress, 모델 학습·로그 정책을 개인정보·보안
+승인에 포함한다. Azure API key와 GCP ADC credential file을 이미지·VDI 설정 파일·journal에 저장하지 않는다.
+
 ### 4.2 기동 및 확인
 
 ```bash
@@ -153,7 +168,7 @@ Canary는 한 테넌트의 2~5명으로 시작한다. 다음 중 하나라도 �
 | 429 증가 | ingress 로그, `Limits:IngestionPerMinute` | VDI 수·업로드 주기 확인 후 한도 조정 |
 | spool `*.bad` | VDI spool 디렉터리 | 4xx `detail` 확인, 계약/Privacy/토큰 수정 |
 | journal 손상 | `/v1/storage`의 `corrupt` | 직전 백업 보존, 손상 줄과 종료 원인 조사 |
-| AI 비용·지연 | `/v1/metrics`의 AI 호출·p95 | Bedrock 비활성화 또는 재추론 설정 검토 |
+| AI 비용·지연 | `/v1/metrics`의 AI 호출·p95 | 선택 공급자 비활성화 또는 재추론 설정 검토 |
 | PII 신고 | feedback `privacy_report`, 운영 알림 | 해당 관측·클라이언트 정책 격리, 보안 절차 개시 |
 
 현재 API 지표는 운영 진단용이다. 장기 운영 전에는 중앙 로그, tenant별 대시보드, 보존·삭제 정책,

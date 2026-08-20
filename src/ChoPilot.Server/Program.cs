@@ -11,7 +11,7 @@ using ChoPilot.Server;
 //   POST /v1/observations : 관측 이벤트 → 서명 → 매핑 → Business Object 저장
 //   GET  /v1/guide        : 현재 업무 요약 + 진행률 + 다음작업 힌트(Actionable=false)
 //
-// AI 매퍼는 설정으로 선택: 기본 StubAiMapper, UseBedrock=true 면 BedrockAiMapper.
+// AI 매퍼는 설정으로 선택: 기본 Stub, Bedrock/Vertex AI(A DC)/Azure OpenAI endpoint.
 // ─────────────────────────────────────────────────────────────────────────────
 
 var builder = WebApplication.CreateBuilder(args);
@@ -65,6 +65,8 @@ builder.Services.AddSingleton<CompletionStore>();
 // 내장 표준 → 키 없는 무료 API → 공공데이터포털(키 필요) → 조직이 지정한 MCP 서버.
 // 네트워크 출처는 <b>기본 전부 비활성</b>이다 — 켜지 않으면 테스트도 CI도 밖으로 나가지 않는다.
 builder.Services.AddHttpClient();
+var llmTimeoutSeconds = Math.Clamp(cfg.GetValue<int?>("Llm:TimeoutSeconds") ?? 45, 5, 300);
+builder.Services.AddHttpClient("llm", client => client.Timeout = TimeSpan.FromSeconds(llmTimeoutSeconds));
 builder.Services.AddSingleton<IFoundationSource, EmbeddedFoundationSource>();
 
 if (cfg.GetValue<bool>("Foundation:ExchangeRate:Enabled"))
@@ -127,28 +129,81 @@ builder.Services.AddSingleton(_ =>
 // 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
 builder.Services.AddSingleton(_ => new PrivacyGate(policyVersion: cfg["Privacy:PolicyVersion"] ?? "1.0"));
 
-if (cfg.GetValue<bool>("UseBedrock"))
+var configuredLlmProvider = cfg["Llm:Provider"]?.Trim().ToLowerInvariant();
+var llmProvider = string.IsNullOrWhiteSpace(configuredLlmProvider)
+    ? (cfg.GetValue<bool>("UseBedrock") ? "bedrock" : "stub") // 기존 설정 호환
+    : configuredLlmProvider;
+
+switch (llmProvider)
 {
-    var region = RegionEndpoint.GetBySystemName(cfg["Aws:Region"] ?? "ap-northeast-2");
-    builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ => new AmazonBedrockRuntimeClient(region));
-    // 현재 Anthropic 모델은 inference profile ID만 지원(ON_DEMAND base id → ResourceNotFoundException).
-    builder.Services.AddSingleton<IAiMapper>(sp => new BedrockAiMapper(
-        sp.GetRequiredService<IAmazonBedrockRuntime>(),
-        cfg["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
-}
-else
-{
-    builder.Services.AddSingleton<IAiMapper, StubAiMapper>();
+    case "stub":
+        builder.Services.AddSingleton<IAiMapper, StubAiMapper>();
+        break;
+
+    case "bedrock":
+    {
+        var region = RegionEndpoint.GetBySystemName(cfg["Aws:Region"] ?? "ap-northeast-2");
+        builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ => new AmazonBedrockRuntimeClient(region));
+        // 현재 Anthropic 모델은 inference profile ID만 지원(ON_DEMAND base id → ResourceNotFoundException).
+        builder.Services.AddSingleton<IAiMapper>(sp => new BedrockAiMapper(
+            sp.GetRequiredService<IAmazonBedrockRuntime>(),
+            cfg["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
+        break;
+    }
+
+    case "vertex":
+    case "vertex_ai":
+    {
+        var vertexOptions = new VertexAiOptions(
+            cfg["Llm:Vertex:ProjectId"] ?? "",
+            cfg["Llm:Vertex:Location"] ?? "",
+            cfg["Llm:Vertex:Model"] ?? "");
+        vertexOptions.Validate(); // 잘못된 설정으로 빈 서버가 뜨는 것을 막는다.
+        builder.Services.AddSingleton<ILlmCompletionClient>(sp => new VertexAiCompletionClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient("llm"),
+            vertexOptions));
+        builder.Services.AddSingleton<IAiMapper>(sp => new CompletionClientAiMapper(
+            sp.GetRequiredService<ILlmCompletionClient>()));
+        break;
+    }
+
+    case "azure":
+    case "azure_openai":
+    {
+        var azureOptions = new AzureOpenAiOptions(
+            cfg["Llm:AzureOpenAI:Endpoint"] ?? "",
+            cfg["Llm:AzureOpenAI:Deployment"] ?? "",
+            cfg["Llm:AzureOpenAI:ApiVersion"] ?? "",
+            cfg["Llm:AzureOpenAI:ApiKey"],
+            cfg["Llm:AzureOpenAI:BearerToken"]);
+        azureOptions.Validate(); // credential 누락을 첫 관측까지 미루지 않는다.
+        builder.Services.AddSingleton<ILlmCompletionClient>(sp => new AzureOpenAiCompletionClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient("llm"),
+            azureOptions));
+        builder.Services.AddSingleton<IAiMapper>(sp => new CompletionClientAiMapper(
+            sp.GetRequiredService<ILlmCompletionClient>()));
+        break;
+    }
+
+    default:
+        throw new InvalidOperationException(
+            $"Llm:Provider '{llmProvider}'는 stub|bedrock|vertex|azure_openai 중 하나여야 한다");
 }
 
 // 지식 초안 서술(§5.5 3단계). 기본은 AI 없음 — 루프는 LLM 없이도 완결된다.
 // Knowledge:UseEditor=true 일 때만 배치에서 초안 1건당 1회 호출된다.
-if (cfg.GetValue<bool>("UseBedrock") && cfg.GetValue<bool>("Knowledge:UseEditor"))
+if (llmProvider == "bedrock" && cfg.GetValue<bool>("Knowledge:UseEditor"))
 {
     builder.Services.AddSingleton<IKnowledgeEditor>(sp => new BedrockKnowledgeEditor(
         sp.GetRequiredService<IAmazonBedrockRuntime>(),
         cfg["Knowledge:EditorModelId"] ?? cfg["Aws:BedrockModelId"]
             ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
+}
+else if (llmProvider is "vertex" or "vertex_ai" or "azure" or "azure_openai" &&
+         cfg.GetValue<bool>("Knowledge:UseEditor"))
+{
+    builder.Services.AddSingleton<IKnowledgeEditor>(sp => new LlmKnowledgeEditor(
+        sp.GetRequiredService<ILlmCompletionClient>()));
 }
 else
 {

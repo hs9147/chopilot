@@ -22,7 +22,7 @@
 
 ## 확정 설계 전제
 
-- **AWS** (Amazon Bedrock, 테넌트 VPC 내부) · **영속 VDI 내부 데스크톱 에이전트**
+- **선택형 LLM Gateway** (Bedrock 기본, Vertex AI ADC·Azure OpenAI endpoint 지원) · **영속 VDI 내부 데스크톱 에이전트**
 - 1차 타깃 = **자체 Procurement 웹앱** (소스 접근 불가 → 사용자 관점 UIA 관측)
 - **Adaptive Semantic Mapping** : AI 동적 매핑 + 자가학습 캐시 + 화면변경 자가치유
 - **2-Plane 지식 모델** : 구조 지식 공유 + 사용자별 로직 격리·도출

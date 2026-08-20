@@ -10,6 +10,7 @@ public sealed class ChoPilotConfig
     public MappingConfig Mapping { get; set; } = new();
     public PrivacyConfig Privacy { get; set; } = new();
     public ObservationConfig Observation { get; set; } = new();
+    public LlmConfig Llm { get; set; } = new();
     public ServerConfig Server { get; set; } = new();
     public ConsentConfig Consent { get; set; } = new();
 }
@@ -52,6 +53,30 @@ public sealed class MappingConfig
 public sealed class PrivacyConfig
 {
     public string PolicyVersion { get; set; } = "1.0";
+}
+
+/// <summary>클라이언트 진단과 서버가 공통으로 쓰는 공급자별 LLM 설정. 비밀은 환경변수/보안 저장소에서 주입한다.</summary>
+public sealed class LlmConfig
+{
+    public int TimeoutSeconds { get; set; } = 45;
+    public VertexLlmConfig Vertex { get; set; } = new();
+    public AzureOpenAiLlmConfig AzureOpenAI { get; set; } = new();
+}
+
+public sealed class VertexLlmConfig
+{
+    public string ProjectId { get; set; } = "";
+    public string Location { get; set; } = "us-central1";
+    public string Model { get; set; } = "";
+}
+
+public sealed class AzureOpenAiLlmConfig
+{
+    public string Endpoint { get; set; } = "";
+    public string Deployment { get; set; } = "";
+    public string ApiVersion { get; set; } = "2024-10-21";
+    public string ApiKey { get; set; } = "";
+    public string BearerToken { get; set; } = "";
 }
 
 public sealed class ObservationConfig

@@ -836,7 +836,7 @@ Local Privacy Gate (PII 마스킹, 경량)
 
 ## Server (AWS, Tenant VPC)
 
-LLM : **Amazon Bedrock (Claude)**
+LLM : **Amazon Bedrock (Claude) 기본**, tenant 승인 시 **Vertex AI(ADC)** 또는 **Azure OpenAI(deployment endpoint)** 선택
 
 Embedding : Bedrock (Titan / Cohere)
 
@@ -887,8 +887,8 @@ Cho-Pilot은
 
 | 영역 | 정책 |
 |------|------|
-| 전송 경계 | 모든 데이터 테넌트 VPC 내부. Bedrock은 VPC Endpoint 경유(인터넷 미경유) |
-| LLM 데이터 | Bedrock 무학습 정책. 프롬프트/응답 로그 보존기간·암호화 |
+| 전송 경계 | Bedrock은 VPC Endpoint 경유(인터넷 미경유). Vertex/Azure는 승인된 project/resource·리전·private egress만 사용 |
+| LLM 데이터 | 공급자별 무학습·프롬프트/응답 보존 정책, 보존기간·암호화 |
 | 저장 | S3/Aurora SSE-KMS 암호화, 전송 TLS/mTLS |
 | 최소수집 | Privacy Gate에서 PII 마스킹, 화이트리스트 필드만 승격. 변경 없음은 폐기하고 동일 화면은 델타 우선 |
 | 동의/투명성 | 관측 범위 고지 UX, on/off·앱별 제외 |

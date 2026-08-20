@@ -28,7 +28,7 @@ dotnet run --project src/ChoPilot.Server      # → http://localhost:5080
 |---|---|
 | .NET 8 SDK | 전 구성요소 |
 | Windows + VDI | `chopilot-dump`(UIA 관측)만 해당. 서버·콘솔은 Linux/macOS에서 돈다 |
-| AWS 자격증명 | Bedrock 실추론(`UseBedrock=true`)만 해당 |
+| 클라우드 자격증명 | 선택한 LLM 공급자: Bedrock(IAM), Vertex AI(ADC), Azure OpenAI(API key 또는 Entra bearer) |
 
 ```bash
 dotnet build ChoPilot.sln                                  # Windows
@@ -87,7 +87,12 @@ Storage__Path=/var/lib/chopilot
 정말 신뢰 경계 안(VPC/mTLS)이라 헤더 방식을 써야 한다면
 `Auth__AllowUnverifiedInProduction=true`로 **명시**해야 한다.
 
-### 2.5 Bedrock 실추론
+### 2.5 LLM 공급자 선택
+
+기본은 `stub`이다. `Llm:Provider`를 비워 두면 이전 설정과 호환되어 `UseBedrock=true`일 때만
+Bedrock을 고른다. 명시적으로 선택하면 `stub | bedrock | vertex | azure_openai` 중 하나여야 한다.
+
+#### Bedrock
 
 ```bash
 UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
@@ -96,6 +101,36 @@ UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 기본은 `StubAiMapper`(별칭 매칭)다. 모델 ID는 **inference profile**(`us.`/`global.` 접두)이어야 한다 —
 현재 Anthropic 모델은 ON_DEMAND base id로 호출하면 `ResourceNotFoundException`이다.
 지식 초안 서술까지 AI로 다듬으려면 `Knowledge__UseEditor=true`를 함께 준다(초안 1건당 1회).
+
+#### Vertex AI — ADC
+
+Vertex는 API key/서비스 계정 JSON을 앱 설정으로 읽지 않고 표준 **Application Default Credentials**를
+쓴다. 개발 PC에서는 먼저 `gcloud auth application-default login`을 실행하고, 운영에서는 Workload
+Identity 또는 런타임 service account에 `aiplatform.models.predict` 권한을 부여한다.
+
+```bash
+Llm__Provider=vertex \
+Llm__Vertex__ProjectId=my-gcp-project \
+Llm__Vertex__Location=us-central1 \
+Llm__Vertex__Model=gemini-2.5-flash \
+dotnet run --project src/ChoPilot.Server
+```
+
+#### Azure OpenAI — deployment endpoint
+
+Azure OpenAI는 모델명이 아니라 **deployment**를 호출한다. API key 또는 Entra bearer token 중 하나만
+시크릿 매니저에서 주입한다.
+
+```bash
+Llm__Provider=azure_openai \
+Llm__AzureOpenAI__Endpoint=https://<resource>.openai.azure.com \
+Llm__AzureOpenAI__Deployment=<deployment> \
+Llm__AzureOpenAI__ApiVersion=2024-10-21 \
+Llm__AzureOpenAI__ApiKey='<secret>' \
+dotnet run --project src/ChoPilot.Server
+```
+
+`Knowledge__UseEditor=true`이면 선택한 Bedrock·Vertex·Azure 공급자가 지식 초안 서술에도 쓰인다.
 
 ---
 
@@ -110,7 +145,11 @@ UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 | `Auth:Jwt:SigningKey` / `Issuer` / `Audience` | — | jwt 모드 필수. Production에서는 모두 필수이며 issuer/audience를 검증 |
 | `Storage:Path` | (없음) | 저널 디렉터리. 비면 인메모리 |
 | `UseBedrock` | `false` | 실 AI 추론 |
-| `Knowledge:UseEditor` | `false` | 초안 본문을 LLM이 다듬음 (`UseBedrock`도 필요) |
+| `Llm:Provider` | (빈 값) | `stub` | `bedrock` | `vertex` | `azure_openai`. 빈 값은 기존 `UseBedrock` 호환 |
+| `Llm:Vertex:ProjectId` / `Location` / `Model` | — | Vertex AI `generateContent`; 인증은 ADC |
+| `Llm:AzureOpenAI:Endpoint` / `Deployment` / `ApiVersion` | — | Azure OpenAI Chat Completions deployment |
+| `Llm:AzureOpenAI:ApiKey` / `BearerToken` | — | 둘 중 정확히 하나만. 소스·설정 파일에 커밋 금지 |
+| `Knowledge:UseEditor` | `false` | 초안 본문을 선택한 Bedrock·Vertex·Azure LLM이 다듬음 |
 | `Knowledge:MinSupport` / `MinDistinctUsers` | `3` / `2` | 지식 승격 게이트(지지도·k인) |
 | `Mapping:ThetaHigh` | `0.8` | 신뢰 임계 θ. 미만은 캐시에 있어도 적중이 아니다 |
 | `Mapping:ReinferAfterHours` | `24` | 저신뢰 매핑 재추론 백오프. **0으로 두지 마라** — θ 절벽이 되살아난다 |
