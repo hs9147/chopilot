@@ -19,6 +19,12 @@ public sealed record CorrectionRequest(
 public sealed record PromoteRequest(string Signature, string Scope, double? Confidence = null);
 
 /// <summary>
+/// AI 추정 이력 한 페이지. <paramref name="Total"/>은 <b>자르기 전</b> 개수다 —
+/// 몇 건이 잘렸는지 말해 주지 않으면 화면이 "이게 전부"라고 잘못 말한다.
+/// </summary>
+public sealed record InferenceLedger(IReadOnlyList<MappingEntry> Entries, int Total);
+
+/// <summary>
 /// 보정 처리 결과. 온톨로지에 없는 개념이 하나라도 있으면 <b>전체를 거부</b>한다.
 /// </summary>
 public sealed record CorrectionOutcome(MappingEntry? Entry, List<string> UnknownConcepts)
@@ -71,15 +77,20 @@ public sealed class PersonalizationService
     /// 검수 큐에서 막아 둔 격리가 이 목록으로 새는 것과 같다.
     /// </para>
     /// </summary>
-    public IReadOnlyList<MappingEntry> Inferences(string userId, int limit = 200) =>
-        _cache.All()
+    public InferenceLedger Inferences(string userId, int limit = 200)
+    {
+        var visible = _cache.All()
             .Where(e => !e.Scope.StartsWith("personal:", StringComparison.Ordinal)
                         || e.Scope == PersonalScope(userId))
             // 사람이 만든 매핑(보정·승격)은 LastInferredAt이 null이다 — 맨 뒤가 아니라 맨 앞이어야
             // "방금 내가 고친 것"이 보인다. 그래서 null을 현재로 취급한다.
             .OrderByDescending(e => e.LastInferredAt ?? DateTimeOffset.MaxValue)
-            .Take(limit)
             .ToList();
+
+        // 잘린 사실을 함께 돌려준다. 침묵하는 절단은 "이게 전부"로 읽힌다 —
+        // 대장에서 그 오해는 "AI가 결정해 둔 것은 이것뿐"이라는 잘못된 확신이 된다.
+        return new InferenceLedger(visible.Take(limit).ToList(), visible.Count);
+    }
 
     /// <summary>
     /// 추정 제외 — 캐시에서 지운다. 지운 엔트리를 돌려주고, 없거나 권한이 없으면 null.

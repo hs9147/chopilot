@@ -776,9 +776,11 @@ app.MapGet("/v1/inferences",
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
 
+    var ledger = svc.Inferences(actor, limit ?? 200);
     return Results.Ok(new
     {
-        entries = svc.Inferences(actor, limit ?? 200),
+        entries = ledger.Entries,
+        total = ledger.Total,          // 자르기 전 개수 — 몇 건이 잘렸는지 화면이 말할 수 있어야 한다
         screens = MeasurementViews.ScreensBySignature(store.List()),
         thetaHigh = config.GetValue("Mapping:ThetaHigh", 0.8),
     });

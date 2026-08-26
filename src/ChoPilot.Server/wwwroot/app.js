@@ -31,6 +31,8 @@ const state = {
   suggestions: null,
   concepts: [],
   inferences: null,       // AI 추정 이력(trusted 포함). null이면 측정자 미지정이라 안 불렀다
+  inferenceTotal: 0,      // 서버가 자르기 전 개수 — 잘린 사실을 화면이 말해야 한다
+  inferenceFilter: 'all', // all | pending | trusted
   screens: {},            // 서명 → 화면 필드(ref·라벨·값). AI 판단을 원본과 대조하는 데 쓴다
   thetaHigh: 0.8,         // 서버의 Mapping:ThetaHigh — 신뢰도 판정 기준선
   editing: null,          // 보정 중인 검수 큐 항목
@@ -337,6 +339,7 @@ async function refreshAll() {
     state.screens = review.screens || {};        // 서명 → 그 화면에 실제로 보였던 필드
     state.thetaHigh = review.thetaHigh ?? 0.8;   // 신뢰도를 판정으로 바꾸는 기준선
     state.inferences = inferences ? inferences.entries : null;   // null = 측정자 미지정
+    state.inferenceTotal = inferences ? inferences.total : 0;    // 자르기 전 개수
     state.decisions = decisions.entries;
     state.suggestions = suggestions.stats;
     state.concepts = ontology.concepts;
@@ -493,7 +496,30 @@ function renderInferences() {
     return;
   }
 
-  const rows = state.inferences.map((e, i) => {
+  const FILTERS = [
+    ['all', '전체', () => true],
+    ['pending', '검수 대기', (e) => e.status !== 'trusted'],
+    ['trusted', '채택됨', (e) => e.status === 'trusted'],
+  ];
+  const active = FILTERS.find((f) => f[0] === state.inferenceFilter) || FILTERS[0];
+
+  // 인덱스는 필터링 전 배열 기준으로 유지한다 — 필터를 바꾼 뒤 버튼이 다른 행을 가리키면
+  // "제외" 가 엉뚱한 추정을 지운다.
+  const shown = state.inferences
+    .map((e, i) => ({ e, i }))
+    .filter(({ e }) => active[2](e));
+
+  const chips = FILTERS.map(([key, label, pred]) => {
+    const n = state.inferences.filter(pred).length;
+    return `<button class="btn btn-sm ${key === active[0] ? '' : 'btn-ghost'}" data-filter="${key}">${label} ${n}</button>`;
+  }).join(' ');
+
+  // 잘린 사실을 적는다 — 침묵하는 절단은 "이게 전부"로 읽힌다.
+  const truncated = state.inferenceTotal > state.inferences.length
+    ? `<span class="warn-text">전체 ${state.inferenceTotal}건 중 최근 ${state.inferences.length}건만 실렸다</span>`
+    : `전체 ${state.inferenceTotal}건`;
+
+  const rows = shown.map(({ e, i }) => {
     const screen = state.screens[e.signature];
     const personal = e.scope.startsWith('personal:');
     // LastInferredAt이 null이면 AI가 아니라 사람이 만든 매핑이다 — 그 구분이 이력의 요점이다.
@@ -523,12 +549,17 @@ function renderInferences() {
     </tr>`;
   }).join('');
 
-  box.innerHTML = `<table>
+  box.innerHTML = `<div class="actions">${chips}<span class="hint">${truncated}</span></div>
+    <table>
     <thead><tr>
       <th>추론 시각</th><th>화면</th><th>업무객체</th><th class="num">필드</th>
       <th class="num">신뢰도</th><th>상태</th><th></th>
     </tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows || '<tr><td colspan="7" class="empty">이 조건에 해당하는 추정이 없다</td></tr>'}</tbody></table>`;
+
+  box.querySelectorAll('[data-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => { state.inferenceFilter = btn.dataset.filter; renderInferences(); });
+  });
 
   box.querySelectorAll('[data-edit]').forEach((btn) => {
     btn.addEventListener('click', () => {

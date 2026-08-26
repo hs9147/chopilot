@@ -249,6 +249,24 @@ public class InferenceHistoryTests
                  && d.GetProperty("actor").GetString() == "hong");
     }
 
+    // 침묵하는 절단은 "이게 전부"로 읽힌다 — 대장에서 그 오해는
+    // "AI가 결정해 둔 것은 이것뿐"이라는 잘못된 확신이 된다.
+    [Fact]
+    public async Task Inferences_SayHowManyWereCutOff()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+
+        for (var i = 0; i < 3; i++)
+            await client.PostAsJsonAsync("/v1/observations", Event($"e{i}", $"https://proc/s{i}/create"));
+
+        var page = JsonDocument.Parse(await (await client.SendAsync(
+            As(HttpMethod.Get, "/v1/inferences?limit=2", "hong"))).Content.ReadAsStringAsync()).RootElement;
+
+        Assert.Equal(2, page.GetProperty("entries").GetArrayLength());
+        Assert.Equal(3, page.GetProperty("total").GetInt32());
+    }
+
     [Fact]
     public async Task Discard_RefusesAnotherPersonsPersonalScope()
     {
