@@ -69,6 +69,33 @@ public sealed class ProposalEngine
         var criteria = _proposals.Current(now);
         var changes = new List<CriteriaChange>();
         var notes = new List<string>();
+
+        var rules = TuneThresholds(criteria, changes, notes);
+        var weighted = TuneWeights(criteria, changes, notes);
+
+        if (changes.Count == 0)
+            return new TuningResult(criteria.Version, criteria.Version, changes, notes);
+
+        var revised = _proposals.Revise(ProposalScoring.Normalize(weighted with
+        {
+            UpdatedAt = now,
+            Rationale = string.Join(" · ", changes.Select(c => $"{c.Kind} {c.Field}: {c.Reason}")),
+            Rules = rules,
+        }));
+        return new TuningResult(criteria.Version, revised.Version, changes, notes);
+    }
+
+    /// <summary>
+    /// 종류별 문턱 — <b>평점 평균</b>으로 움직인다.
+    ///
+    /// <para>
+    /// 채택률이 아니라 평점을 쓰는 이유: "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔하고,
+    /// 그걸 쓸모없음으로 세면 <b>옳게 찾아낸 종류의 문턱이 올라간다</b>. 평가와 채택은 다른 질문이다.
+    /// </para>
+    /// </summary>
+    private List<KindRule> TuneThresholds(
+        ProposalCriteria criteria, List<CriteriaChange> changes, List<string> notes)
+    {
         var rules = criteria.Rules.ToList();
 
         foreach (var outcome in _proposals.Outcomes())
@@ -77,55 +104,127 @@ public sealed class ProposalEngine
             if (index < 0) continue;
             var rule = rules[index];
 
-            if (outcome.Decided < ProposalCriteria.MinDecisionsToTune)
+            if (outcome.Rated < ProposalCriteria.MinRatingsToTune)
             {
-                notes.Add($"{outcome.Kind}: 결정 {outcome.Decided}건 < {ProposalCriteria.MinDecisionsToTune}건 — 표본이 얇아 그대로 둔다");
+                notes.Add($"{outcome.Kind}: 평가 {outcome.Rated}건 < {ProposalCriteria.MinRatingsToTune}건 — 표본이 얇아 그대로 둔다");
                 continue;
             }
 
-            var rate = outcome.AcceptanceRate!.Value;
+            var mean = outcome.MeanRating!.Value;
+            var seen = $"평균 {mean:0.0}점 ({outcome.Rated}건 평가)";
 
-            if (rate < 0.25 && rule.MinScore < 0.8)
+            if (mean < 2.5 && rule.MinScore < ProposalCriteria.MaxWeight + 0.2)
             {
                 var to = Math.Round(Math.Min(0.8, rule.MinScore + 0.1), 2);
-                rules[index] = rule with { MinScore = to };
-                changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
-                    $"채택률 {rate:P0} ({outcome.Accepted}/{outcome.Decided}) — 문턱을 올린다"));
+                if (to > rule.MinScore)
+                {
+                    rules[index] = rule with { MinScore = to };
+                    changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
+                        $"{seen} — 문턱을 올린다"));
+                    continue;
+                }
             }
-            else if (rate < 0.25)
+
+            if (mean < 2.5)
             {
-                // 문턱을 이미 끝까지 올렸는데도 기각된다 — 점수가 아니라 종류가 틀렸다.
+                // 문턱을 이미 끝까지 올렸는데도 낮게 평가된다 — 점수가 아니라 종류가 틀렸다.
                 rules[index] = rule with
                 {
                     Enabled = false,
-                    DisabledReason = $"문턱 {rule.MinScore:0.00}에서도 채택률 {rate:P0} ({outcome.Accepted}/{outcome.Decided})",
+                    DisabledReason = $"문턱 {rule.MinScore:0.00}에서도 {seen}",
                 };
                 changes.Add(new CriteriaChange(outcome.Kind, "Enabled", 1, 0,
-                    $"문턱을 올려도 채택되지 않는다 — 이 종류를 끈다"));
+                    $"문턱을 올려도 낮게 평가된다 — 이 종류를 끈다"));
             }
-            else if (rate > 0.7 && rule.MinScore > 0.2)
+            else if (mean > 3.8 && rule.MinScore > 0.2)
             {
                 var to = Math.Round(Math.Max(0.2, rule.MinScore - 0.05), 2);
                 rules[index] = rule with { MinScore = to };
                 changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
-                    $"채택률 {rate:P0} ({outcome.Accepted}/{outcome.Decided}) — 문턱을 내려 더 올린다"));
+                    $"{seen} — 문턱을 내려 더 올린다"));
             }
             else
             {
-                notes.Add($"{outcome.Kind}: 채택률 {rate:P0} — 조정 구간(25%~70%) 안이라 그대로 둔다");
+                notes.Add($"{outcome.Kind}: {seen} — 조정 구간(2.5~3.8점) 안이라 그대로 둔다");
             }
         }
 
-        if (changes.Count == 0)
-            return new TuningResult(criteria.Version, criteria.Version, changes, notes);
+        return rules;
+    }
 
-        var revised = _proposals.Revise(criteria with
+    /// <summary>
+    /// 축 가중치 — 평점과 <b>같이 움직인 축</b>을 올리고 반대로 움직인 축을 내린다.
+    ///
+    /// <para>
+    /// 문턱은 "얼마나 확실해야 올릴까"를 정하지만, 어느 축이 실제로 유용성을 예측하는지는
+    /// 시드에서 추측한 값이다. 사람이 매긴 점수와 축값의 상관이 그 추측을 관측으로 바꾼다.
+    /// </para>
+    /// <para>
+    /// 가중치는 <b>모든 종류에 걸리는</b> 변경이라 문턱보다 조건이 빡빡하다: 표본 하한이 높고,
+    /// 약한 상관은 무시하고, 한 번에 <see cref="ProposalCriteria.WeightStep"/>만 움직인다.
+    /// 크게 움직이면 다음 회차가 그걸 되돌리며 진동한다.
+    /// </para>
+    /// </summary>
+    private ProposalCriteria TuneWeights(
+        ProposalCriteria criteria, List<CriteriaChange> changes, List<string> notes)
+    {
+        var rated = _proposals.Rated();
+        if (rated.Count < ProposalCriteria.MinRatingsToTuneWeights)
         {
-            UpdatedAt = now,
-            Rationale = string.Join(" · ", changes.Select(c => $"{c.Kind} {c.Field}: {c.Reason}")),
-            Rules = rules,
-        });
-        return new TuningResult(criteria.Version, revised.Version, changes, notes);
+            notes.Add($"가중치: 평가 {rated.Count}건 < {ProposalCriteria.MinRatingsToTuneWeights}건 —"
+                + " 모든 종류에 걸리는 변경이라 더 모아야 한다");
+            return criteria;
+        }
+
+        var ratings = rated.Select(p => (double)p.Rating!.Value).ToList();
+        var next = criteria;
+
+        foreach (var (axis, get, set) in Axes())
+        {
+            var values = rated
+                .Select(p => p.Score.Dimensions.FirstOrDefault(d => d.Name == axis)?.Value ?? 0)
+                .ToList();
+
+            var r = ProposalScoring.Correlation(values, ratings);
+            if (r is null)
+            {
+                notes.Add($"가중치 {axis}: 축값이나 평점이 전부 같아 상관을 말할 수 없다");
+                continue;
+            }
+
+            if (Math.Abs(r.Value) < ProposalCriteria.MinCorrelation)
+            {
+                notes.Add($"가중치 {axis}: 상관 {r.Value:+0.00;-0.00} — 약해서 잡음과 구분되지 않는다");
+                continue;
+            }
+
+            var from = get(next);
+            var to = Math.Round(Math.Clamp(
+                from + Math.Sign(r.Value) * ProposalCriteria.WeightStep,
+                ProposalCriteria.MinWeight, ProposalCriteria.MaxWeight), 3);
+
+            if (Math.Abs(to - from) < 1e-9)
+            {
+                notes.Add($"가중치 {axis}: 상관 {r.Value:+0.00;-0.00}이지만 이미 한계값이다");
+                continue;
+            }
+
+            next = set(next, to);
+            changes.Add(new CriteriaChange("(전 종류)", $"{axis} 가중치", from, to,
+                $"평점과 상관 {r.Value:+0.00;-0.00} ({rated.Count}건) — {(r.Value > 0 ? "올린다" : "내린다")}"));
+        }
+
+        return next;
+    }
+
+    private static IEnumerable<(string Axis,
+        Func<ProposalCriteria, double> Get,
+        Func<ProposalCriteria, double, ProposalCriteria> Set)> Axes()
+    {
+        yield return ("근거", c => c.EvidenceWeight, (c, v) => c with { EvidenceWeight = v });
+        yield return ("도달", c => c.ReachWeight, (c, v) => c with { ReachWeight = v });
+        yield return ("최근성", c => c.RecencyWeight, (c, v) => c with { RecencyWeight = v });
+        yield return ("영향", c => c.ImpactWeight, (c, v) => c with { ImpactWeight = v });
     }
 
     /// <summary>후보 산출 → 점수 → 게이트 → 적재. 떨어진 것은 이유와 함께 함께 돌려준다.</summary>

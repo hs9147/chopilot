@@ -512,10 +512,14 @@ function renderProposalCriteria() {
 
   const rows = c.rules.map((r) => {
     const o = outcomes[r.kind];
-    // 채택률은 결정된 것 중의 비율이다. 결정이 없을 때 0%로 적으면 "전부 기각"으로 읽힌다.
+    // 기준을 고치는 건 평점이다. 채택률은 참고로만 보여준다 —
+    // "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔해서 유용성과 어긋난다.
+    const rating = o && o.rated > 0
+      ? `${o.meanRating.toFixed(1)} <span class="hint">(${o.rated}건)</span>`
+      : `<span class="hint">평가 없음</span>`;
     const rate = o && o.decided > 0
-      ? `${pct(o.acceptanceRate)} <span class="hint">(${o.accepted}/${o.decided})</span>`
-      : `<span class="hint">결정 없음</span>`;
+      ? `<span class="hint">${pct(o.acceptanceRate)}</span>`
+      : `<span class="hint">—</span>`;
     return `<tr class="${r.enabled ? '' : 'row-gone'}">
       <td>${esc(kindLabel(r.kind))} <div class="hint mono">${esc(r.kind)}</div></td>
       <td>${r.enabled
@@ -525,6 +529,7 @@ function renderProposalCriteria() {
       <td class="num">${r.minDistinctUsers}명</td>
       <td class="num">${r.minScore.toFixed(2)}</td>
       <td class="num">${o ? o.proposed : 0}</td>
+      <td class="num">${rating}</td>
       <td class="num">${rate}</td>
     </tr>`;
   }).join('');
@@ -537,7 +542,8 @@ function renderProposalCriteria() {
     <table>
       <thead><tr>
         <th>종류</th><th>상태</th><th class="num">최소 관측</th><th class="num">최소 인원</th>
-        <th class="num">최소 점수</th><th class="num">제안</th><th class="num">채택률</th>
+        <th class="num">최소 점수</th><th class="num">제안</th>
+        <th class="num">평균 평가</th><th class="num">채택률<br><span class="hint">참고</span></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -571,8 +577,21 @@ function renderProposals() {
           ${decided
             ? `<span class="badge ${p.status === 'accepted' ? 'badge-mask' : 'badge-leak'}">
                  ${p.status === 'accepted' ? '채택' : '기각'}</span>
+               ${p.rating
+                 ? `<span class="badge">평가 ${p.rating}/5</span>`
+                 : '<span class="badge">평가 없음</span>'}
                <span class="hint">${esc(p.decidedBy || '')} ${esc((p.decidedAt || '').slice(0, 16).replace('T', ' '))}</span>`
             : `<span class="hint">점수 ${p.score.total.toFixed(2)} · 기준 v${p.criteriaVersion}</span>
+               <label class="rating">유용함
+                 <select class="text" data-rating="${i}">
+                   <option value="">평가 안 함</option>
+                   <option value="1">1 — 쓸모없다</option>
+                   <option value="2">2</option>
+                   <option value="3" selected>3 — 보통</option>
+                   <option value="4">4</option>
+                   <option value="5">5 — 매우 유용</option>
+                 </select>
+               </label>
                <button class="btn btn-sm btn-primary" data-accept="${i}">채택</button>
                <button class="btn btn-sm btn-ghost" data-reject="${i}">기각</button>`}
         </div>
@@ -588,10 +607,18 @@ function renderProposals() {
     </div>`;
   }).join('');
 
+  // 평가는 그 제안 카드 안의 select에서 읽는다 — 카드마다 다른 값이라 인덱스로 짚는다.
+  const ratingOf = (i) => {
+    const v = box.querySelector(`[data-rating="${i}"]`)?.value;
+    return v ? Number(v) : null;
+  };
+
   box.querySelectorAll('[data-accept]').forEach((b) =>
-    b.addEventListener('click', () => decideProposal(items[Number(b.dataset.accept)], true, b)));
+    b.addEventListener('click', () =>
+      decideProposal(items[Number(b.dataset.accept)], true, ratingOf(b.dataset.accept), b)));
   box.querySelectorAll('[data-reject]').forEach((b) =>
-    b.addEventListener('click', () => decideProposal(items[Number(b.dataset.reject)], false, b)));
+    b.addEventListener('click', () =>
+      decideProposal(items[Number(b.dataset.reject)], false, ratingOf(b.dataset.reject), b)));
 }
 
 function renderProposalSkipped() {
@@ -636,12 +663,11 @@ async function generateProposals(button) {
   });
 }
 
-async function decideProposal(proposal, accept, button) {
+async function decideProposal(proposal, accept, rating, button) {
   const msg = $('proposalMsg');
   const actor = requireActor(msg);
   if (!actor) return;
 
-  // 기각 사유는 다음 자체 평가의 유일한 질적 입력이다 — 비워도 되지만 물어는 본다.
   const note = accept ? null : prompt(`기각 사유 (선택) — "${proposal.title}"`, '');
   if (!accept && note === null) return;   // 취소
 
@@ -650,10 +676,14 @@ async function decideProposal(proposal, accept, button) {
       await api(`/v1/proposals/${encodeURIComponent(proposal.id)}/decide`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-ChoPilot-User': actor },
-        body: JSON.stringify({ accept, note: note || null }),
+        body: JSON.stringify({ accept, rating, note: note || null }),
       });
       msg.className = 'hint';
-      msg.textContent = `${accept ? '채택' : '기각'}됨 — 이 결정이 다음 자체 평가의 입력이 된다.`;
+      // 채택 여부가 아니라 평가가 기준을 고친다 — 평가를 비웠으면 그렇다고 말해 준다.
+      msg.textContent = `${accept ? '채택' : '기각'}됨 — `
+        + (rating
+          ? `평가 ${rating}/5가 기준 학습에 들어간다.`
+          : '평가를 매기지 않아 기준 학습에는 쓰이지 않는다.');
       await refreshAll();
     } catch (err) {
       msg.className = 'warn';

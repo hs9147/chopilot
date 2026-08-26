@@ -7,14 +7,18 @@ namespace ChoPilot.Server;
 /// 제안 결정 요청. 사유는 선택이지만 <b>다음 자체 평가의 유일한 질적 입력</b>이라
 /// 기각할 때는 적어 두는 편이 낫다 — 숫자만으로는 왜 기각됐는지 되짚을 수 없다.
 /// </summary>
-public sealed record ProposalDecision(bool Accept, string? Note = null);
+public sealed record ProposalDecision(bool Accept, int? Rating = null, string? Note = null);
 
-/// <summary>종류별 결정 성적. 자체 평가의 입력이다.</summary>
-public sealed record KindOutcome(string Kind, int Proposed, int Accepted, int Rejected)
+/// <summary>종류별 성적. <see cref="MeanRating"/>이 기준을 고치는 입력이다.</summary>
+public sealed record KindOutcome(
+    string Kind, int Proposed, int Accepted, int Rejected, int Rated, double? MeanRating)
 {
     public int Decided => Accepted + Rejected;
 
-    /// <summary>결정된 것 중 채택 비율. 결정이 없으면 null — 0으로 두면 "전부 거부"로 읽힌다.</summary>
+    /// <summary>
+    /// 결정된 것 중 채택 비율. 참고 지표일 뿐 <b>기준을 고치는 데 쓰지 않는다</b> —
+    /// "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔해서 유용성과 어긋난다.
+    /// </summary>
     public double? AcceptanceRate => Decided == 0 ? null : (double)Accepted / Decided;
 }
 
@@ -93,14 +97,15 @@ public sealed class ProposalStore
         return true;
     }
 
-    public Proposal? Decide(string id, string status, string actor, string? note, DateTimeOffset at)
+    public Proposal? Decide(
+        string id, string status, string actor, int? rating, string? note, DateTimeOffset at)
     {
         var existing = _proposals.GetValueOrDefault(id);
         if (existing is null || existing.Status != ProposalStatus.Proposed) return null;
 
         var decided = existing with
         {
-            Status = status, DecidedAt = at, DecidedBy = actor, DecisionNote = note,
+            Status = status, DecidedAt = at, DecidedBy = actor, Rating = rating, DecisionNote = note,
         };
         _proposals[id] = decided;
         _journal.Append(decided);
@@ -117,17 +122,24 @@ public sealed class ProposalStore
 
     public int Count => _proposals.Count;
 
+    /// <summary>평가가 달린 제안만. 축 가중치 학습의 입력이다 — 축별 값과 평점이 함께 필요하다.</summary>
+    public IReadOnlyList<Proposal> Rated() =>
+        _proposals.Values.Where(p => p.Rating is not null).ToList();
+
     /// <summary>종류별 성적. 자체 평가가 기준을 조정할 때 보는 유일한 숫자다.</summary>
     public IReadOnlyList<KindOutcome> Outcomes() =>
         ProposalKind.All
             .Select(kind =>
             {
                 var mine = _proposals.Values.Where(p => p.Kind == kind).ToList();
+                var ratings = mine.Where(p => p.Rating is not null).Select(p => (double)p.Rating!.Value).ToList();
                 return new KindOutcome(
                     kind,
                     Proposed: mine.Count,
                     Accepted: mine.Count(p => p.Status == ProposalStatus.Accepted),
-                    Rejected: mine.Count(p => p.Status == ProposalStatus.Rejected));
+                    Rejected: mine.Count(p => p.Status == ProposalStatus.Rejected),
+                    Rated: ratings.Count,
+                    MeanRating: ratings.Count == 0 ? null : Math.Round(ratings.Average(), 2));
             })
             .ToList();
 }

@@ -174,7 +174,7 @@
 
   <!-- ⑨ 업무 개선 제안 -->
   <section class="card" id="s-proposals">
-    <h2><span class="step">9</span> 업무 개선 제안 <span class="tag">작업 이력 → 제안 · 자체 평가</span></h2>
+    <h2><span class="step">9</span> 업무 개선 제안 <span class="tag">작업 이력 → 제안 · 사용자 평가로 학습</span></h2>
     <p class="hint">
       쌓인 작업 이력(화면 방문·전이·대사·보정)에서 <strong>사람이 할 일</strong>을 뽑는다.
       ⑤ 지식과는 다른 통이다 — 지식은 승인되면 시스템 동작이 바뀌지만, 여기 제안은
@@ -187,16 +187,29 @@
     </p>
 
     <div class="actions">
-      <button id="proposalGenerate" class="btn btn-primary">자체 평가 → 제안 생성</button>
+      <button id="proposalGenerate" class="btn btn-primary">평가 반영 → 제안 생성</button>
       <span id="proposalMsg" class="hint"></span>
     </div>
 
-    <h3>선정 기준 <span class="hint">— 결정이 쌓이면 스스로 고친다</span></h3>
+    <h3>선정 기준 <span class="hint">— 사용자 평가가 쌓이면 스스로 고친다</span></h3>
     <p class="hint">
       제안은 네 축(근거·도달·최근성·영향)을 가중 합산한 점수와 종류별 문턱으로 걸러진다.
       <strong>도달(몇 명)</strong>은 사생활 경계이기도 하다 — 한 사람의 관측만으로 만든 제안은
       그 사람의 업무 습관을 팀에 드러낸다.
     </p>
+    <p class="hint">
+      기준을 고치는 것은 <strong>사용자 평가(1~5)</strong>이지 채택 여부가 아니다.
+      "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔한데, 그걸 쓸모없음으로 세면
+      <strong>옳게 찾아낸 종류의 문턱이 올라간다</strong>. 평가 없이 결정하면 그 건은 학습에 쓰이지 않는다.
+    </p>
+    <ul class="hint">
+      <li><strong>종류별 문턱</strong> — 평점 평균이 2.5 미만이면 올리고, 3.8 초과면 내린다.
+        문턱 상한에서도 낮게 평가되면 그 종류를 끈다(점수가 아니라 종류가 틀린 것이다).
+        평가 5건 미만이면 건드리지 않는다.</li>
+      <li><strong>축 가중치</strong> — 평점과 같이 움직인 축을 올리고 반대로 움직인 축을 내린다.
+        모든 종류에 걸리는 변경이라 조건이 더 빡빡하다: 평가 8건 이상, 상관 0.3 이상,
+        한 번에 0.05만.</li>
+    </ul>
     <div id="proposalCriteria" class="table-scroll"></div>
 
     <h3>제안</h3>

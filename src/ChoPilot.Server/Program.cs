@@ -769,13 +769,22 @@ app.MapPost("/v1/proposals/{id}/decide",
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
 
+    // 범위를 벗어난 평점을 조용히 잘라 넣으면 학습이 없는 값으로 돌아간다.
+    if (body.Rating is { } rating && !Proposal.IsValidRating(rating))
+        return Results.BadRequest(new
+        {
+            error = $"평가는 {Proposal.MinRating}~{Proposal.MaxRating} 사이여야 한다 (받은 값: {rating})",
+        });
+
     var status = body.Accept ? ProposalStatus.Accepted : ProposalStatus.Rejected;
-    var decided = store.Decide(id, status, actor, body.Note, DateTimeOffset.UtcNow);
+    var decided = store.Decide(id, status, actor, body.Rating, body.Note, DateTimeOffset.UtcNow);
     if (decided is null)
         return Results.NotFound(new { error = "그런 제안이 없거나 이미 결정됐다" });
 
     decisions.Record($"proposal_{status}", actor, decided.Id, decided.Kind, decided.Score.Total,
-        $"{decided.Title}{(string.IsNullOrWhiteSpace(body.Note) ? "" : $" — {body.Note}")}");
+        $"{decided.Title}"
+        + (decided.Rating is { } r ? $" — 평가 {r}/{Proposal.MaxRating}" : " — 평가 없음(기준 학습에 쓰이지 않는다)")
+        + (string.IsNullOrWhiteSpace(body.Note) ? "" : $" · {body.Note}"));
 
     return Results.Ok(decided);
 });

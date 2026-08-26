@@ -79,8 +79,23 @@ public sealed record ProposalCriteria(
     double ImpactWeight,
     IReadOnlyList<KindRule> Rules)
 {
-    /// <summary>자체 평가에 필요한 최소 결정 수. 이보다 적으면 기준을 건드리지 않는다.</summary>
-    public const int MinDecisionsToTune = 5;
+    /// <summary>종류별 문턱을 고치는 데 필요한 최소 평가 수. 이보다 적으면 건드리지 않는다.</summary>
+    public const int MinRatingsToTune = 5;
+
+    /// <summary>
+    /// 축 가중치를 고치는 데 필요한 최소 평가 수. 문턱보다 높게 잡는다 —
+    /// 가중치는 <b>모든 종류에 걸리는</b> 변경이라 적은 표본으로 움직이면 잡음이 전 종류로 번진다.
+    /// </summary>
+    public const int MinRatingsToTuneWeights = 8;
+
+    /// <summary>한 번에 움직이는 가중치 폭. 크게 움직이면 다음 회차가 그걸 되돌리며 진동한다.</summary>
+    public const double WeightStep = 0.05;
+
+    public const double MinWeight = 0.05;
+    public const double MaxWeight = 0.60;
+
+    /// <summary>이만큼은 상관이 있어야 가중치를 건드린다. 약한 상관은 표본 잡음과 구분되지 않는다.</summary>
+    public const double MinCorrelation = 0.3;
 
     /// <summary>최근성 감쇠의 반감기. 이보다 오래된 근거는 점수가 절반이 된다.</summary>
     public static readonly TimeSpan RecencyHalfLife = TimeSpan.FromDays(14);
@@ -128,7 +143,20 @@ public sealed record Proposal(
 
     DateTimeOffset? DecidedAt = null,
     string? DecidedBy = null,
-    string? DecisionNote = null);
+    string? DecisionNote = null,
+
+    /// <summary>
+    /// 사용자 평가 1~5. <b>채택 여부와 별개다</b> — 근거는 맞지만 지금 손댈 수 없어 기각하는 일이
+    /// 흔하고, 그걸 "쓸모없음"으로 세면 옳게 찾아낸 종류의 문턱이 올라간다.
+    /// 기준을 고치는 유일한 입력이라 평가가 없으면 그 결정은 학습에 쓰이지 않는다.
+    /// </summary>
+    int? Rating = null)
+{
+    public const int MinRating = 1;
+    public const int MaxRating = 5;
+
+    public static bool IsValidRating(int rating) => rating is >= MinRating and <= MaxRating;
+}
 
 /// <summary>
 /// 게이트에서 떨어진 후보와 그 이유. <b>버린 것을 말하지 않으면 "이게 전부"로 읽힌다</b> —
@@ -182,6 +210,39 @@ public static class ProposalScoring
 
     private static double Saturate(int observed, int full) =>
         full <= 0 ? 1.0 : Math.Clamp((double)observed / full, 0, 1);
+
+    /// <summary>
+    /// 피어슨 상관. 표본이 얇거나 한쪽이 전부 같은 값이면 null —
+    /// 0으로 돌려주면 "상관이 없다"로 읽히지만 실제로는 <b>말할 수 없다</b>는 뜻이다.
+    /// </summary>
+    public static double? Correlation(IReadOnlyList<double> xs, IReadOnlyList<double> ys)
+    {
+        if (xs.Count != ys.Count || xs.Count < 3) return null;
+
+        var meanX = xs.Average();
+        var meanY = ys.Average();
+        var sxx = xs.Sum(x => (x - meanX) * (x - meanX));
+        var syy = ys.Sum(y => (y - meanY) * (y - meanY));
+        if (sxx <= 1e-9 || syy <= 1e-9) return null;   // 한쪽이 상수 — 기울기를 말할 수 없다
+
+        var sxy = xs.Zip(ys, (x, y) => (x - meanX) * (y - meanY)).Sum();
+        return sxy / Math.Sqrt(sxx * syy);
+    }
+
+    /// <summary>가중치 합을 1로 되돌린다. 정규화하지 않으면 총점의 눈금이 회차마다 달라진다.</summary>
+    public static ProposalCriteria Normalize(ProposalCriteria criteria)
+    {
+        var sum = criteria.EvidenceWeight + criteria.ReachWeight
+                  + criteria.RecencyWeight + criteria.ImpactWeight;
+        if (sum <= 0) return criteria;
+        return criteria with
+        {
+            EvidenceWeight = Math.Round(criteria.EvidenceWeight / sum, 3),
+            ReachWeight = Math.Round(criteria.ReachWeight / sum, 3),
+            RecencyWeight = Math.Round(criteria.RecencyWeight / sum, 3),
+            ImpactWeight = Math.Round(criteria.ImpactWeight / sum, 3),
+        };
+    }
 
     private static string ImpactNote(double value) => value switch
     {

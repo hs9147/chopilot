@@ -245,3 +245,7 @@ fieldset input {
 }
 .score { display: block; margin-top: 8px; font-size: 15px; font-weight: 650; }
 .actions { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 16px; }
+
+/* 제안 평가 — 결정 버튼 바로 옆에 둔다. 다른 화면으로 물으면 평가가 비는 일이 잦다. */
+.rating { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.rating select.text { min-width: 0; font-size: 12px; }
