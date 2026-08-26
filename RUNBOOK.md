@@ -2,6 +2,7 @@
 
 설계는 [ARCHITECTURE.md](ARCHITECTURE.md), 개요는 [README.md](README.md).
 이 문서는 **띄우고, 넣고, 확인하는** 절차만 담는다.
+Production 전환·Canary·롤백은 [OPERATIONS-TRANSITION-GUIDE.md](OPERATIONS-TRANSITION-GUIDE.md)를 따른다.
 
 ---
 
@@ -27,7 +28,7 @@ dotnet run --project src/ChoPilot.Server      # → http://localhost:5080
 |---|---|
 | .NET 8 SDK | 전 구성요소 |
 | Windows + VDI | `chopilot-dump`(UIA 관측)만 해당. 서버·콘솔은 Linux/macOS에서 돈다 |
-| AWS 자격증명 | Bedrock 실추론(`UseBedrock=true`)만 해당 |
+| 클라우드 자격증명 | 선택한 LLM 공급자: Bedrock(IAM), Vertex AI(ADC), Azure OpenAI(API key 또는 Entra bearer) |
 
 ```bash
 dotnet build ChoPilot.sln                                  # Windows
@@ -86,15 +87,50 @@ Storage__Path=/var/lib/chopilot
 정말 신뢰 경계 안(VPC/mTLS)이라 헤더 방식을 써야 한다면
 `Auth__AllowUnverifiedInProduction=true`로 **명시**해야 한다.
 
-### 2.5 Bedrock 실추론
+### 2.5 LLM 공급자 선택
+
+기본은 `stub`이다. `Llm:Provider`를 비워 두면 이전 설정과 호환되어 `UseBedrock=true`일 때만
+Bedrock을 고른다. 명시적으로 선택하면 `stub | bedrock | vertex | azure_openai` 중 하나여야 한다.
+
+#### Bedrock
 
 ```bash
-UseBedrock=true Aws__Region=ap-northeast-2 dotnet run --project src/ChoPilot.Server
+UseBedrock=true Aws__Region=us-east-1 dotnet run --project src/ChoPilot.Server
 ```
 
 기본은 `StubAiMapper`(별칭 매칭)다. 모델 ID는 **inference profile**(`us.`/`global.` 접두)이어야 한다 —
 현재 Anthropic 모델은 ON_DEMAND base id로 호출하면 `ResourceNotFoundException`이다.
 지식 초안 서술까지 AI로 다듬으려면 `Knowledge__UseEditor=true`를 함께 준다(초안 1건당 1회).
+
+#### Vertex AI — ADC
+
+Vertex는 API key/서비스 계정 JSON을 앱 설정으로 읽지 않고 표준 **Application Default Credentials**를
+쓴다. 개발 PC에서는 먼저 `gcloud auth application-default login`을 실행하고, 운영에서는 Workload
+Identity 또는 런타임 service account에 `aiplatform.models.predict` 권한을 부여한다.
+
+```bash
+Llm__Provider=vertex \
+Llm__Vertex__ProjectId=my-gcp-project \
+Llm__Vertex__Location=us-central1 \
+Llm__Vertex__Model=gemini-2.5-flash \
+dotnet run --project src/ChoPilot.Server
+```
+
+#### Azure OpenAI — deployment endpoint
+
+Azure OpenAI는 모델명이 아니라 **deployment**를 호출한다. API key 또는 Entra bearer token 중 하나만
+시크릿 매니저에서 주입한다.
+
+```bash
+Llm__Provider=azure_openai \
+Llm__AzureOpenAI__Endpoint=https://<resource>.openai.azure.com \
+Llm__AzureOpenAI__Deployment=<deployment> \
+Llm__AzureOpenAI__ApiVersion=2024-10-21 \
+Llm__AzureOpenAI__ApiKey='<secret>' \
+dotnet run --project src/ChoPilot.Server
+```
+
+`Knowledge__UseEditor=true`이면 선택한 Bedrock·Vertex·Azure 공급자가 지식 초안 서술에도 쓰인다.
 
 ---
 
@@ -106,10 +142,14 @@ UseBedrock=true Aws__Region=ap-northeast-2 dotnet run --project src/ChoPilot.Ser
 |---|---|---|
 | `Auth:Mode` | `header` | `header`(검증 없음) \| `jwt` |
 | `Auth:AllowUnverifiedInProduction` | `false` | 운영에서 검증 없는 인증을 명시적으로 허용 |
-| `Auth:Jwt:SigningKey` / `Issuer` / `Audience` | — | jwt 모드 필수(SigningKey), 나머지는 주면 검증 |
+| `Auth:Jwt:SigningKey` / `Issuer` / `Audience` | — | jwt 모드 필수. Production에서는 모두 필수이며 issuer/audience를 검증 |
 | `Storage:Path` | (없음) | 저널 디렉터리. 비면 인메모리 |
 | `UseBedrock` | `false` | 실 AI 추론 |
-| `Knowledge:UseEditor` | `false` | 초안 본문을 LLM이 다듬음 (`UseBedrock`도 필요) |
+| `Llm:Provider` | (빈 값) | `stub` | `bedrock` | `vertex` | `azure_openai`. 빈 값은 기존 `UseBedrock` 호환 |
+| `Llm:Vertex:ProjectId` / `Location` / `Model` | — | Vertex AI `generateContent`; 인증은 ADC |
+| `Llm:AzureOpenAI:Endpoint` / `Deployment` / `ApiVersion` | — | Azure OpenAI Chat Completions deployment |
+| `Llm:AzureOpenAI:ApiKey` / `BearerToken` | — | 둘 중 정확히 하나만. 소스·설정 파일에 커밋 금지 |
+| `Knowledge:UseEditor` | `false` | 초안 본문을 선택한 Bedrock·Vertex·Azure LLM이 다듬음 |
 | `Knowledge:MinSupport` / `MinDistinctUsers` | `3` / `2` | 지식 승격 게이트(지지도·k인) |
 | `Mapping:ThetaHigh` | `0.8` | 신뢰 임계 θ. 미만은 캐시에 있어도 적중이 아니다 |
 | `Mapping:ReinferAfterHours` | `24` | 저신뢰 매핑 재추론 백오프. **0으로 두지 마라** — θ 절벽이 되살아난다 |
@@ -117,8 +157,16 @@ UseBedrock=true Aws__Region=ap-northeast-2 dotnet run --project src/ChoPilot.Ser
 | `Foundation:Holiday:ServiceKey` | — | 공공데이터포털 공휴일 |
 | `Foundation:BusinessStatus:ServiceKey` | — | 국세청 사업자등록 상태 |
 | `Foundation:Mcp:0:Endpoint` / `Tool` / `Kind` / `KeyArgument` | — | MCP 서버 도구를 기반 출처로 |
+| `Limits:IngestionPerMinute` | `120` | 적재 속도 상한. 넘으면 **429** |
+| `Llm:TimeoutSeconds` | `45` | LLM 호출 타임아웃 (5~300으로 절단) |
 
 > 서비스 키·서명 키는 **환경변수로만** 넣어라. `appsettings.json`에 넣으면 커밋된다.
+
+**반복 관측과 적재 상한.** `--watch`와 콘솔의 자동 반복은 둘 다 이 상한에 걸릴 수 있다.
+분당 120건이 기본이므로 `--watch 1`(회차당 1건)은 여유가 있지만, 여러 대가 동시에 붙거나
+콘솔 반복을 같이 돌리면 넘길 수 있다. 429는 **재시도 가능한 실패**로 분류되므로 이벤트는
+유실되지 않고 스풀에 남았다가 다음 회차에 나간다 — 다만 그 상태가 길어지면 상한을 올리거나
+간격을 늘려야 한다.
 
 ---
 
@@ -357,6 +405,7 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 | `chopilot-watch.cmd` 더블클릭 시 창이 바로 닫힘 | `chopilot-dump.exe`가 옆에 없다. `dotnet build` 산출물 폴더(`bin\...\net8.0\`)에서 실행하거나 `dotnet publish -o` 로 한 폴더에 모아라 |
 | Windows에서 `dotnet build` 실패 (NETSDK1073 등) | Linux/macOS에서 솔루션 전체를 빌드하려 한 것이다. 클라이언트는 `net8.0-windows`라 Windows에서만 빌드된다 |
 | `--watch`가 계속 "변화 없음"만 찍음 | 정상이다 — 화면이 그대로면 보내지 않는다. 강제로 보내려면 `--resend-unchanged` |
+| 적재가 429로 밀림 | `Limits:IngestionPerMinute`(기본 120) 초과. 유실은 아니고 스풀에 남는다 — 간격을 늘리거나 상한을 올려라 |
 | `--watch`가 "관측 중단"만 찍음 | 동의 게이트가 막고 있다. `Consent:Enabled`와 제외 목록을 확인하라 |
 | `--completed --watch`가 거부됨 | 의도된 것이다. 완료 신호는 저장 직후 한 번만 따로 실행한다 |
 | 기반 대사가 전부 `no_master` | 출처를 아직 안 붙였다. `Foundation:*` 설정 후 `POST /v1/foundation/refresh` |

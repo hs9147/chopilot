@@ -10,7 +10,7 @@ using Microsoft.Extensions.Configuration;
 // chopilot-dump — UIA 관측 도구 (PHASE0-PLAN WS2/WS3)
 //
 //   사용법:
-//     chopilot-dump [--out <파일>] [--delay <초>] [--baseline] [--bedrock]
+//     chopilot-dump [--out <파일>] [--delay <초>] [--baseline] [--bedrock|--vertex|--azure-openai]
 //                   [--upload [url]] [--spool-dir <경로>] [--completed]
 //                   [--watch [초]] [--rounds <n>] [--resend-unchanged]
 //
@@ -25,6 +25,8 @@ using Microsoft.Extensions.Configuration;
 //     3. ConsentPolicy(on/off·앱별 제외) → PrivacyGate(마스킹) → 화면 서명 계산
 //     4. --baseline : StubAiMapper(alias) 매핑 시도 (대조군)
 //        --bedrock  : Bedrock 동적 매핑 시도 (실 AI, appsettings 설정 사용)
+//        --vertex   : Google ADC로 Vertex AI Gemini 동적 매핑 시도
+//        --azure-openai : Azure OpenAI deployment 동적 매핑 시도
 //                     자동 모드에서는 첫 회차에만 돈다 — 매 회차 호출하면 비용이 시간에 비례한다
 //        --upload [url] : 서버로 POST 후 Guide 조회 (기본 Server:IngestionEndpoint)
 //                         전송 실패 시 durable 스풀에 적재, 다음 회차에서 재전송
@@ -77,13 +79,19 @@ var gate = new PrivacyGate(policyVersion: cfg.Privacy.PolicyVersion);
 var consentPolicy = new ConsentPolicy(cfg.Consent);
 var changes = new ChangeDetector();
 var jsonOpts = new JsonSerializerOptions { WriteIndented = true };
+var sessionId = Guid.NewGuid().ToString();
+var userId = string.IsNullOrWhiteSpace(cfg.Server.UserId)
+    ? HashUser(Environment.UserName)
+    : cfg.Server.UserId.Trim();
 
 // 업로드 자원은 <b>회차마다 만들지 않는다</b> — HttpClient를 반복 생성하면 소켓이 고갈된다.
 var url = opts.UploadUrl
     ?? (string.IsNullOrWhiteSpace(cfg.Server.IngestionEndpoint) ? "http://127.0.0.1:5080" : cfg.Server.IngestionEndpoint);
 var spoolDir = opts.SpoolDir ?? Path.Combine(AppContext.BaseDirectory, "spool");
 var spool = opts.Upload ? new EventSpool(spoolDir) : null;
-using var uploader = opts.Upload ? new Uploader(url) : null;
+using var uploader = opts.Upload
+    ? new Uploader(url, cfg.Server.BearerToken, userId, cfg.Server.TenantId)
+    : null;
 
 if (opts.Upload)
     Console.Error.WriteLine($"[chopilot-dump] upload → {url} (spool: {spoolDir}, 대기 {spool!.PendingCount})");
@@ -114,29 +122,30 @@ return single.Outcome == RoundOutcome.Failed ? 1 : 0;
 
 async Task<ObservationRound> RoundAsync(CancellationToken ct)
 {
-    var (screen, rawTree) = observer.CaptureForegroundWindow(cfg.Observation.MaxDepth, cfg.Observation.MaxNodes);
+    var (screen, rawTree, processName) =
+        observer.CaptureForegroundWindow(cfg.Observation.MaxDepth, cfg.Observation.MaxNodes);
 
     // 동의 게이트는 <b>매 회차</b> 다시 평가한다. 한 번만 보고 반복하면, 사용자가 도중에
     // 제외 대상 앱으로 옮겨가도 계속 캡처된다 — 그건 동의가 아니다.
-    var consent = consentPolicy.Evaluate(screen);
+    var consent = consentPolicy.Evaluate(screen, processName);
     if (!consent.Allowed) return new ObservationRound(RoundOutcome.Blocked, consent.Reason);
 
-    var (maskedTree, maskedRefs) = gate.Apply(rawTree);
+    var (safeScreen, maskedTree, maskedRefs) = gate.Apply(screen, rawTree);
 
     // 값까지 보는 지문. 아무 일도 없었으면 보내지 않는다 — 같은 화면을 반복 적재하면
     // 감사 로그와 적중률 분모가 부풀어 학습이 아니라 반복을 센 결과가 된다.
-    if (opts.SkipUnchanged && !changes.HasChanged(screen, maskedTree))
-        return new ObservationRound(RoundOutcome.Unchanged, SignatureService.NormalizeRoute(screen.Url));
+    if (opts.SkipUnchanged && !changes.HasChanged(safeScreen, maskedTree))
+        return new ObservationRound(RoundOutcome.Unchanged, SignatureService.NormalizeRoute(safeScreen.Url));
 
     captured++;
-    var signature = SignatureService.Compute(screen, maskedTree);
+    var signature = SignatureService.Compute(safeScreen, maskedTree);
 
     var evt = new ObservationEvent(
         EventId: Guid.NewGuid().ToString(),
-        SessionId: Environment.MachineName,
-        UserId: HashUser(Environment.UserName),
+        SessionId: sessionId,
+        UserId: userId,
         CapturedAt: DateTimeOffset.Now,
-        Screen: screen,
+        Screen: safeScreen,
         Tree: maskedTree,
         Privacy: new PrivacyInfo(gate.PolicyVersion, maskedRefs),
         Trigger: opts.Trigger);
@@ -149,7 +158,7 @@ async Task<ObservationRound> RoundAsync(CancellationToken ct)
         Console.Error.WriteLine($"[chopilot-dump] masked refs = {maskedRefs.Count}");
     }
 
-    // 대조군·Bedrock은 진단이다. 자동 모드에서 매 회차 돌리면 비용이 시간에 비례한다.
+    // 대조군·외부 LLM은 진단이다. 자동 모드에서 매 회차 돌리면 비용이 시간에 비례한다.
     if (captured == 1 || opts.Watch is null)
     {
         if (opts.Baseline) await RunMapper("baseline(stub)", new StubAiMapper(), maskedTree);
@@ -159,6 +168,23 @@ async Task<ObservationRound> RoundAsync(CancellationToken ct)
             var region = RegionEndpoint.GetBySystemName(cfg.Aws.Region);
             using var bedrock = new AmazonBedrockRuntimeClient(region);
             await RunMapper("bedrock(ai)", new BedrockAiMapper(bedrock, cfg.Aws.BedrockModelId), maskedTree);
+        }
+        if (opts.Vertex)
+        {
+            using var vertexHttp = NewLlmHttpClient(cfg.Llm.TimeoutSeconds);
+            Console.Error.WriteLine($"[chopilot-dump] Vertex AI: project={cfg.Llm.Vertex.ProjectId}, " +
+                $"location={cfg.Llm.Vertex.Location}, model={cfg.Llm.Vertex.Model} (ADC)");
+            await RunMapper("vertex(ai)", new CompletionClientAiMapper(new VertexAiCompletionClient(vertexHttp,
+                new VertexAiOptions(cfg.Llm.Vertex.ProjectId, cfg.Llm.Vertex.Location, cfg.Llm.Vertex.Model))), maskedTree);
+        }
+        if (opts.AzureOpenAi)
+        {
+            using var azureHttp = NewLlmHttpClient(cfg.Llm.TimeoutSeconds);
+            Console.Error.WriteLine($"[chopilot-dump] Azure OpenAI: endpoint={cfg.Llm.AzureOpenAI.Endpoint}, " +
+                $"deployment={cfg.Llm.AzureOpenAI.Deployment}");
+            await RunMapper("azure-openai(ai)", new CompletionClientAiMapper(new AzureOpenAiCompletionClient(azureHttp,
+                new AzureOpenAiOptions(cfg.Llm.AzureOpenAI.Endpoint, cfg.Llm.AzureOpenAI.Deployment,
+                    cfg.Llm.AzureOpenAI.ApiVersion, cfg.Llm.AzureOpenAI.ApiKey, cfg.Llm.AzureOpenAI.BearerToken))), maskedTree);
         }
     }
 
@@ -246,6 +272,11 @@ static async Task RunMapper(string label, IAiMapper mapper, UiNode tree)
     }
 }
 
+static HttpClient NewLlmHttpClient(int timeoutSeconds) => new()
+{
+    Timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds, 5, 300)),
+};
+
 static ChoPilotConfig LoadConfig()
 {
     var config = new ConfigurationBuilder()
@@ -274,6 +305,8 @@ static Options ParseArgs(string[] args)
             case "--delay" when i + 1 < args.Length: o.Delay = int.Parse(args[++i]); break;
             case "--baseline": o.Baseline = true; break;
             case "--bedrock": o.Bedrock = true; break;
+            case "--vertex": o.Vertex = true; break;
+            case "--azure-openai": o.AzureOpenAi = true; break;
             case "--upload":
                 o.Upload = true;
                 if (i + 1 < args.Length && !args[i + 1].StartsWith("--")) o.UploadUrl = args[++i];
@@ -304,6 +337,8 @@ sealed class Options
     public int Delay { get; set; } = 3;
     public bool Baseline { get; set; }
     public bool Bedrock { get; set; }
+    public bool Vertex { get; set; }
+    public bool AzureOpenAi { get; set; }
     public bool Upload { get; set; }
     public string? UploadUrl { get; set; }
     public string? SpoolDir { get; set; }

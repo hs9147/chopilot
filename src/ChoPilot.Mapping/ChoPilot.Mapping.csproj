@@ -9,6 +9,8 @@
   <ItemGroup>
     <!-- Bedrock 호출용. StubAiMapper만 쓸 경우 없어도 빌드되지만, BedrockAiMapper에 필요. -->
     <PackageReference Include="AWSSDK.BedrockRuntime" Version="3.7.*" />
+    <!-- Vertex AI REST 호출의 Application Default Credentials(ADC) 해석용. -->
+    <PackageReference Include="Google.Apis.Auth" Version="1.73.0" />
   </ItemGroup>
 
   <ItemGroup>

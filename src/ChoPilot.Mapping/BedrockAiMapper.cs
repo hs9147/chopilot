@@ -68,41 +68,6 @@ public sealed class BedrockAiMapper : IAiMapper
             if (usage.TryGetProperty("output_tokens", out var ot)) outputTokens = ot.GetInt32();
         }
 
-        var json = ExtractJson(text);
-        if (json is null) return new MappingInference(businessHint, new(), inputTokens, outputTokens);
-
-        using var mapped = JsonDocument.Parse(json);
-        var root = mapped.RootElement;
-        var bo = root.TryGetProperty("business_object", out var b) ? b.GetString() ?? businessHint : businessHint;
-
-        var fields = new List<FieldMapping>();
-        if (root.TryGetProperty("fields", out var arr) && arr.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var f in arr.EnumerateArray())
-            {
-                var conceptName = f.GetProperty("concept").GetString() ?? "";
-
-                // 환각 방지 필터는 <b>이 요청에 실린 온톨로지</b>로 건다 — 하드코딩 시드로 걸면
-                // 새로 게시된 개념이 프롬프트에는 들어갔는데 응답에서 조용히 버려진다.
-                var concept = Array.Find(ontology,
-                    c => c.Name.Equals(conceptName, StringComparison.OrdinalIgnoreCase));
-                if (concept is null) continue;
-
-                fields.Add(new FieldMapping(
-                    ElementRef: f.GetProperty("element_ref").GetString() ?? "",
-                    Concept: concept.Name,
-                    Confidence: f.TryGetProperty("confidence", out var c) ? c.GetDouble() : 0.5,
-                    Provenance: "ai",
-                    Sensitive: concept.Sensitive));
-            }
-        }
-        return new MappingInference(bo, fields, inputTokens, outputTokens);
-    }
-
-    private static string? ExtractJson(string text)
-    {
-        var start = text.IndexOf('{');
-        var end = text.LastIndexOf('}');
-        return (start >= 0 && end > start) ? text[start..(end + 1)] : null;
+        return MappingInferenceParser.Parse(text, businessHint, ontology, inputTokens, outputTokens);
     }
 }

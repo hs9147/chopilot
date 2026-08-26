@@ -21,6 +21,15 @@ public enum SendOutcome
 
 /// <summary>스풀 배출 결과. 격리 건수를 함께 돌려준다 — 침묵하는 폐기는 전송으로 읽힌다.</summary>
 public sealed record DrainResult(int Sent, int Rejected);
+public sealed record SpoolStatus(int Pending, long PendingBytes, int Quarantined);
+
+public sealed record EventSpoolOptions(
+    int MaxEvents = 10_000,
+    long MaxBytes = 512L * 1024 * 1024,
+    TimeSpan? Retention = null)
+{
+    public TimeSpan EffectiveRetention => Retention ?? TimeSpan.FromDays(7);
+}
 
 /// <summary>
 /// Durable 로컬 이벤트 스풀 (ARCHITECTURE §3.1 Event Buffer, PHASE1-DESIGN §2.1/§7 가용성 NFR).
@@ -32,25 +41,41 @@ public sealed class EventSpool
 {
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = false };
     private readonly string _dir;
+    private readonly EventSpoolOptions _options;
+    private long _sequence;
 
-    public EventSpool(string directory)
+    public EventSpool(string directory, EventSpoolOptions? options = null)
     {
         _dir = directory;
+        _options = options ?? new EventSpoolOptions();
         Directory.CreateDirectory(_dir);
+        _sequence = SpoolFiles().Select(ParseSequence).DefaultIfEmpty(0).Max();
+        TrimExpired();
     }
 
     /// <summary>스풀에 대기 중인 이벤트 수.</summary>
     public int PendingCount => SpoolFiles().Count();
+    public SpoolStatus Status => new(PendingCount, SpoolFiles().Sum(FileSize), QuarantinedFiles().Count());
 
     /// <summary>이벤트를 durable 스풀에 적재.</summary>
     public void Enqueue(ObservationEvent evt)
     {
-        var name = $"{evt.CapturedAt.UtcTicks:D19}_{evt.EventId}.json";
+        var payload = JsonSerializer.Serialize(evt, Json);
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(payload);
+        if (bytes > _options.MaxBytes)
+            throw new InvalidOperationException("event payload exceeds spool quota");
+        EnsureCapacity(bytes);
+
+        var sequence = Interlocked.Increment(ref _sequence);
+        // event_id는 파일명에 직접 넣지 않는다. 계약 바깥 입력도 경로를 벗어날 수 없다.
+        var eventToken = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(evt.EventId)))[..16].ToLowerInvariant();
+        var name = sequence.ToString("D19") + "_" + eventToken + ".json";
         var tmp = Path.Combine(_dir, name + ".tmp");
         var final = Path.Combine(_dir, name);
 
         // 원자적 쓰기: tmp에 완전히 쓴 뒤 rename → 부분 파일(반쪽 JSON) 방지.
-        File.WriteAllText(tmp, JsonSerializer.Serialize(evt, Json));
+        File.WriteAllText(tmp, payload);
         File.Move(tmp, final, overwrite: true);
     }
 
@@ -128,6 +153,50 @@ public sealed class EventSpool
         Directory.Exists(_dir)
             ? Directory.EnumerateFiles(_dir, "*.json").OrderBy(Path.GetFileName, StringComparer.Ordinal)
             : Enumerable.Empty<string>();
+
+    private IEnumerable<string> QuarantinedFiles() =>
+        Directory.Exists(_dir) ? Directory.EnumerateFiles(_dir, "*.bad") : Enumerable.Empty<string>();
+
+    private void EnsureCapacity(long incomingBytes)
+    {
+        var pending = SpoolFiles().ToList();
+        var pendingBytes = pending.Sum(FileSize);
+        if (pending.Count + 1 <= _options.MaxEvents && pendingBytes + incomingBytes <= _options.MaxBytes) return;
+
+        // 관측은 같은 우선순위다. 가장 오래된 파일을 격리하고 상태로 노출한다.
+        // Iterate a snapshot: capacity may require evicting more than one file.
+        // Mutating `pending` while enumerating it would fail in that case.
+        foreach (var file in pending.ToList())
+        {
+            var size = FileSize(file);
+            Quarantine(file);
+            pendingBytes -= size;
+            if (pending.Count - 1 <= _options.MaxEvents && pendingBytes + incomingBytes <= _options.MaxBytes)
+                return;
+            pending.Remove(file);
+        }
+        throw new InvalidOperationException("spool quota cannot accommodate event");
+    }
+
+    private void TrimExpired()
+    {
+        var threshold = DateTimeOffset.UtcNow - _options.EffectiveRetention;
+        foreach (var file in SpoolFiles())
+            if (File.GetLastWriteTimeUtc(file) < threshold.UtcDateTime)
+                Quarantine(file);
+    }
+
+    private static long ParseSequence(string path)
+    {
+        var token = Path.GetFileName(path).Split('_', 2)[0];
+        return long.TryParse(token, out var sequence) ? sequence : 0;
+    }
+
+    private static long FileSize(string path)
+    {
+        try { return new FileInfo(path).Length; }
+        catch { return 0; }
+    }
 
     private void Quarantine(string file)
     {

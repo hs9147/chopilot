@@ -19,7 +19,30 @@ namespace ChoPilot.Server;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// <summary>요청 주체. <see cref="Method"/>는 어떻게 알아냈는지 — 감사에 남을 값이다.</summary>
-public sealed record UserPrincipal(string UserId, string Method);
+public sealed record UserPrincipal(
+    string UserId,
+    string Method,
+    string TenantId = "default",
+    IReadOnlySet<string>? Roles = null)
+{
+    public IReadOnlySet<string> EffectiveRoles { get; } =
+        Roles ?? new HashSet<string>(StringComparer.Ordinal);
+
+    public bool IsInRole(string role) => EffectiveRoles.Contains(role);
+}
+
+public static class ChoPilotRole
+{
+    public const string IngestionClient = "ingestion_client";
+    public const string EndUser = "end_user";
+    public const string Reviewer = "reviewer";
+    public const string KnowledgeAdmin = "knowledge_admin";
+    public const string OpsAuditor = "ops_auditor";
+
+    public static readonly IReadOnlySet<string> All = new HashSet<string>(
+        new[] { IngestionClient, EndUser, Reviewer, KnowledgeAdmin, OpsAuditor },
+        StringComparer.Ordinal);
+}
 
 public static class AuthMethod
 {
@@ -56,16 +79,32 @@ public interface IUserPrincipalResolver
 public sealed class TrustedHeaderPrincipalResolver : IUserPrincipalResolver
 {
     public const string HeaderName = "X-ChoPilot-User";
+    public const string TenantHeaderName = "X-ChoPilot-Tenant";
+    public const string RolesHeaderName = "X-ChoPilot-Roles";
 
     public string Method => AuthMethod.TrustedHeader;
     public bool Verifies => false;
     public string? Challenge => null;
 
-    public UserPrincipal? Resolve(HttpContext context) =>
-        context.Request.Headers.TryGetValue(HeaderName, out var values) &&
-        values.ToString().Trim() is { Length: > 0 } value
-            ? new UserPrincipal(value, Method)
-            : null;
+    public UserPrincipal? Resolve(HttpContext context)
+    {
+        if (!context.Request.Headers.TryGetValue(HeaderName, out var values) ||
+            values.ToString().Trim() is not { Length: > 0 } value)
+            return null;
+
+        var tenant = context.Request.Headers[TenantHeaderName].ToString().Trim();
+        if (tenant.Length == 0) tenant = "default";
+
+        var suppliedRoles = context.Request.Headers[RolesHeaderName].ToString()
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(ChoPilotRole.All.Contains)
+            .ToHashSet(StringComparer.Ordinal);
+
+        // trusted_header 자체가 개발 전용이다. 역할 헤더가 없으면 기존 측정 콘솔을 위해 전 역할을 준다.
+        // 운영에서는 이 resolver로 기동할 수 없으므로 권한 경계를 약화시키지 않는다.
+        return new UserPrincipal(value, Method, tenant,
+            suppliedRoles.Count == 0 ? ChoPilotRole.All : suppliedRoles);
+    }
 }
 
 /// <summary>JWT 검증 설정. 대칭키(HS256)와 비대칭 발급자 중 하나를 쓴다.</summary>
@@ -79,6 +118,8 @@ public sealed record JwtAuthOptions
 
     /// <summary>사용자 식별자를 담은 클레임. 기본 <c>sub</c>.</summary>
     public string SubjectClaim { get; init; } = "sub";
+    public string TenantClaim { get; init; } = "tenant_id";
+    public string RoleClaim { get; init; } = "role";
 }
 
 /// <summary>
@@ -94,13 +135,19 @@ public sealed class JwtPrincipalResolver : IUserPrincipalResolver
     private readonly TokenValidationParameters _parameters;
     private readonly JwtSecurityTokenHandler _handler = new();
     private readonly string _subjectClaim;
+    private readonly string _tenantClaim;
+    private readonly string _roleClaim;
 
     public JwtPrincipalResolver(JwtAuthOptions options)
     {
         if (options.SigningKey is not { Length: > 0 } key)
             throw new InvalidOperationException("Auth:Jwt:SigningKey가 없다 — 서명을 검증할 수 없는 인증은 인증이 아니다");
+        if (Encoding.UTF8.GetByteCount(key) < 32)
+            throw new InvalidOperationException("Auth:Jwt:SigningKey는 최소 32바이트여야 한다");
 
         _subjectClaim = options.SubjectClaim;
+        _tenantClaim = options.TenantClaim;
+        _roleClaim = options.RoleClaim;
         _parameters = new TokenValidationParameters
         {
             ValidateIssuerSigningKey = true,
@@ -111,6 +158,7 @@ public sealed class JwtPrincipalResolver : IUserPrincipalResolver
             ValidAudience = options.Audience,
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromSeconds(30),
+            ValidAlgorithms = new[] { SecurityAlgorithms.HmacSha256 },
         };
     }
 
@@ -132,7 +180,18 @@ public sealed class JwtPrincipalResolver : IUserPrincipalResolver
             var subject = claims.FindFirst(_subjectClaim)?.Value
                           ?? claims.FindFirst(ClaimTypes.NameIdentifier)?.Value;
 
-            return subject is { Length: > 0 } ? new UserPrincipal(subject, Method) : null;
+            if (subject is not { Length: > 0 }) return null;
+
+            var tenant = claims.FindFirst(_tenantClaim)?.Value;
+            if (string.IsNullOrWhiteSpace(tenant)) tenant = "default";
+
+            var roles = claims.FindAll(_roleClaim)
+                .Concat(claims.FindAll(ClaimTypes.Role))
+                .SelectMany(c => c.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Where(ChoPilotRole.All.Contains)
+                .ToHashSet(StringComparer.Ordinal);
+
+            return new UserPrincipal(subject, Method, tenant, roles);
         }
         catch (Exception ex) when (ex is SecurityTokenException or ArgumentException)
         {
@@ -162,13 +221,23 @@ public static class AuthenticationSetup
         var mode = cfg["Auth:Mode"]?.Trim().ToLowerInvariant() ?? ModeHeader;
 
         if (mode == ModeJwt)
+        {
+            var issuer = cfg["Auth:Jwt:Issuer"];
+            var audience = cfg["Auth:Jwt:Audience"];
+            if (isProduction && (string.IsNullOrWhiteSpace(issuer) || string.IsNullOrWhiteSpace(audience)))
+                throw new InvalidOperationException(
+                    "운영 JWT는 Auth:Jwt:Issuer와 Auth:Jwt:Audience를 모두 검증해야 한다");
+
             return new JwtPrincipalResolver(new JwtAuthOptions
             {
-                Issuer = cfg["Auth:Jwt:Issuer"],
-                Audience = cfg["Auth:Jwt:Audience"],
+                Issuer = issuer,
+                Audience = audience,
                 SigningKey = cfg["Auth:Jwt:SigningKey"],
                 SubjectClaim = cfg["Auth:Jwt:SubjectClaim"] ?? "sub",
+                TenantClaim = cfg["Auth:Jwt:TenantClaim"] ?? "tenant_id",
+                RoleClaim = cfg["Auth:Jwt:RoleClaim"] ?? "role",
             });
+        }
 
         if (mode != ModeHeader)
             throw new InvalidOperationException($"Auth:Mode '{mode}'는 {ModeHeader}|{ModeJwt} 중 하나여야 한다");

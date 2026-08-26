@@ -1,4 +1,5 @@
 using ChoPilot.Core;
+using System.Collections.Concurrent;
 
 namespace ChoPilot.Mapping;
 
@@ -30,6 +31,7 @@ public sealed class MappingResolver
     private readonly string _orgId;
     private readonly TimeSpan _reinferAfter;
     private readonly Func<DateTimeOffset> _clock;
+    private readonly ConcurrentDictionary<string, Lazy<Task<ResolveResult>>> _inflight = new(StringComparer.Ordinal);
 
     public MappingResolver(
         IMappingCache cache, IAiMapper ai, string orgId = "default", double thetaHigh = 0.8,
@@ -93,25 +95,73 @@ public sealed class MappingResolver
             return new ResolveResult(lowConfidence, Source.DeferredCache);
         }
 
-        // 캐시 미스 / 백오프 만료 / 지식 버전 변경 → AI 동적 매핑
+        // 캐시 미스 / 백오프 만료 / 지식 버전 변경 → 같은 구조·지식 버전은 한 번만 AI 호출.
+        var flightKey = $"{signature}\u001f{knowledge.Version}";
+        var lazy = _inflight.GetOrAdd(flightKey, _ => new Lazy<Task<ResolveResult>>(
+            // 첫 HTTP 요청이 취소돼도 같은 추론을 기다리던 다른 요청까지 취소하면 안 된다.
+            // 호출자 취소는 아래 WaitAsync에서만 적용하고, 공유 작업은 캐시를 채울 때까지 완주한다.
+            () => InferAndCacheAsync(signature, screen, tree, knowledge, businessHint, CancellationToken.None),
+            LazyThreadSafetyMode.ExecutionAndPublication));
+        var task = lazy.Value;
+        _ = task.ContinueWith(_ =>
+            _inflight.TryRemove(new KeyValuePair<string, Lazy<Task<ResolveResult>>>(flightKey, lazy)),
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return await task.WaitAsync(ct);
+    }
+
+    private async Task<ResolveResult> InferAndCacheAsync(
+        string signature, ScreenInfo screen, UiNode tree,
+        CompiledKnowledge knowledge, string businessHint, CancellationToken ct)
+    {
+        // 기다리는 동안 앞 요청이 캐시를 채웠을 수 있다.
+        if (_cache.Get(signature, "global") is { } filled &&
+            filled.Confidence >= _thetaHigh &&
+            filled.OntologyVersion == knowledge.Version)
+            return new ResolveResult(filled, Source.TrustedCache);
+
         var inference = await _ai.InferAsync(businessHint, tree, knowledge.Concepts, ct);
-        var confidence = inference.Fields.Count == 0
+        var validRefs = Flatten(tree).Select(n => n.Ref).ToHashSet(StringComparer.Ordinal);
+        var fields = inference.Fields
+            .Where(f => validRefs.Contains(f.ElementRef))
+            .GroupBy(f => f.ElementRef, StringComparer.Ordinal)
+            .Select(g => g.OrderByDescending(f => f.Confidence).First())
+            .Select(f => f with { Confidence = Math.Clamp(f.Confidence, 0, 1) })
+            .ToList();
+
+        var confidence = fields.Count == 0
             ? 0
-            : inference.Fields.Average(f => f.Confidence);
+            : fields.Average(f => f.Confidence);
+
+        var businessObject = string.IsNullOrWhiteSpace(inference.BusinessObject) ||
+                             inference.BusinessObject.Length > 128
+            ? businessHint
+            : inference.BusinessObject.Trim();
 
         var entry = new MappingEntry(
             Signature: signature,
             Scope: "global",                          // 신규 구조 지식은 Shared Plane에 적재
             UserId: null,
-            BusinessObject: inference.BusinessObject,
+            BusinessObject: businessObject,
             RecordId: screen.RecordHint,
-            Mapping: inference.Fields,
+            Mapping: fields,
             Confidence: confidence,
             Status: confidence >= _thetaHigh ? "trusted" : "pending_review",
-            LastInferredAt: now,
+            LastInferredAt: _clock(),
             OntologyVersion: knowledge.Version);
 
         _cache.Put(entry);
         return new ResolveResult(entry, Source.Ai, inference.InputTokens, inference.OutputTokens);
+    }
+
+    private static IEnumerable<UiNode> Flatten(UiNode root)
+    {
+        var stack = new Stack<UiNode>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            yield return node;
+            foreach (var child in node.Children) stack.Push(child);
+        }
     }
 }

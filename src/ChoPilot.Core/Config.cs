@@ -10,6 +10,7 @@ public sealed class ChoPilotConfig
     public MappingConfig Mapping { get; set; } = new();
     public PrivacyConfig Privacy { get; set; } = new();
     public ObservationConfig Observation { get; set; } = new();
+    public LlmConfig Llm { get; set; } = new();
     public ServerConfig Server { get; set; } = new();
     public ConsentConfig Consent { get; set; } = new();
 }
@@ -54,6 +55,30 @@ public sealed class PrivacyConfig
     public string PolicyVersion { get; set; } = "1.0";
 }
 
+/// <summary>클라이언트 진단과 서버가 공통으로 쓰는 공급자별 LLM 설정. 비밀은 환경변수/보안 저장소에서 주입한다.</summary>
+public sealed class LlmConfig
+{
+    public int TimeoutSeconds { get; set; } = 45;
+    public VertexLlmConfig Vertex { get; set; } = new();
+    public AzureOpenAiLlmConfig AzureOpenAI { get; set; } = new();
+}
+
+public sealed class VertexLlmConfig
+{
+    public string ProjectId { get; set; } = "";
+    public string Location { get; set; } = "us-central1";
+    public string Model { get; set; } = "";
+}
+
+public sealed class AzureOpenAiLlmConfig
+{
+    public string Endpoint { get; set; } = "";
+    public string Deployment { get; set; } = "";
+    public string ApiVersion { get; set; } = "2024-10-21";
+    public string ApiKey { get; set; } = "";
+    public string BearerToken { get; set; } = "";
+}
+
 public sealed class ObservationConfig
 {
     public int MaxDepth { get; set; } = 25;
@@ -64,4 +89,12 @@ public sealed class ServerConfig
 {
     /// <summary>Ingestion 엔드포인트 (Phase 1 업로드용, PoC 단계에선 미사용 가능).</summary>
     public string IngestionEndpoint { get; set; } = "";
+
+    /// <summary>JWT/OIDC access token. 운영에서는 파일이 아니라 OS 보안 저장소/토큰 공급자에서 주입한다.</summary>
+    public string BearerToken { get; set; } = "";
+
+    /// <summary>개발 헤더 모드 또는 토큰 subject와의 계약 검증에 쓰는 사용자 ID.</summary>
+    public string UserId { get; set; } = "";
+
+    public string TenantId { get; set; } = "default";
 }

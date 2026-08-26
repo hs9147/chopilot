@@ -84,6 +84,7 @@ public sealed class ChangeDetector
     {
         sb.Append(node.Ref).Append('')
           .Append(node.Role).Append('')
+          .Append(node.AutomationId).Append('')
           .Append(node.Name).Append('')
           .Append(node.Value).Append('');
 

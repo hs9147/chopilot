@@ -27,6 +27,11 @@ public static class RequestUser
     /// <summary>사용자 식별자만. 인증되지 않았으면 null.</summary>
     public static string? From(HttpRequest request) => Principal(request)?.UserId;
 
+    public static string Tenant(HttpRequest request) => Principal(request)?.TenantId ?? "default";
+
+    public static bool HasAnyRole(HttpRequest request, params string[] roles) =>
+        Principal(request) is { } principal && roles.Any(principal.IsInRole);
+
     /// <summary>
     /// 주체가 필요한 엔드포인트의 한 줄 관문.
     /// 신원이 없으면 <b>401</b>이다 — 본문이 틀린 게 아니라 자격증명이 없는 것이다.
@@ -52,5 +57,28 @@ public static class RequestUser
                 : "유효한 Bearer 토큰이 필요하다",
             method = resolver.Method,
         }, statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    public static IResult? RequireAnyRole(HttpRequest request, out UserPrincipal principal, params string[] roles)
+    {
+        if (Principal(request) is not { } resolved)
+        {
+            principal = new UserPrincipal("", "");
+            Require(request, out _);
+            var resolver = request.HttpContext.RequestServices.GetRequiredService<IUserPrincipalResolver>();
+            if (resolver.Challenge is { } scheme)
+                request.HttpContext.Response.Headers.WWWAuthenticate = scheme;
+            return Results.Json(new { error = "unauthenticated", method = resolver.Method },
+                statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        principal = resolved;
+        if (roles.Length == 0 || roles.Any(resolved.IsInRole)) return null;
+
+        return Results.Json(new
+        {
+            error = "forbidden",
+            required_roles = roles,
+        }, statusCode: StatusCodes.Status403Forbidden);
     }
 }

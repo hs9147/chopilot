@@ -3,7 +3,7 @@
 
 > **Screen을 이해하는 AI를 넘어 Business를 이해하는 AI**
 
-Version : 1.1  
+Version : 1.3
 Status : Proposal  
 연계 : 상세 설계는 [ARCHITECTURE.md](ARCHITECTURE.md) 참조
 
@@ -15,6 +15,8 @@ Status : Proposal
 |---------|------|
 | 1.0 | 최초 제안 |
 | 1.1 | 배포 형상 확정(**AWS + VDI 내부 데스크톱 앱**), 데이터 거버넌스·워크플로 안전장치·성공 지표(KPI) 추가, 위험검증 Phase 0 신설 |
+| 1.2 | **변경 인지 관측(Change-aware Observation)** 추가: UIA 이벤트 기반 캡처, 변경 없음 억제, 체크포인트+델타 기록, 안정 노드 키·복원·보존 정책 및 KPI 반영 |
+| 1.3 | Phase 1 baseline 구현 반영: 인증·역할·Privacy Envelope·멱등 ingestion, 사용자 검측/개인 보정 UI, 안정 노드 키·변경 없음 억제·스풀 quota. 체크포인트+델타와 UIA 이벤트 구독은 단계 배포 대상으로 명시 |
 
 ---
 
@@ -292,6 +294,47 @@ Semantic Data로 처리한다.
 - **Tier 0 (Cooperative)** — 향후 소스 협조 가능 시 계측으로 고정확 방출(현재 미적용)
 
 환경이 **동적으로 구성**되므로 매핑을 하드코딩하지 않고 **런타임 AI(Bedrock) 해석 + 자가학습 캐시 + 화면변경 자가치유**로 적응한다(Adaptive Semantic Mapping). 사내 시스템이므로 확보 가능한 **화면 명세·테스트 환경·도메인 전문가**는 AI의 few-shot 시드·검수 기준으로 활용한다.
+
+### 변경 인지 관측 (Change-aware Observation)
+
+Cho-Pilot이 말하는 기본 캡처는 화면 이미지가 아니라 **접근성 트리의 상태 캡처**다. Canvas·이미지처럼
+UIA로 읽을 수 없는 영역만 Vision 캡처로 보완한다. 사용자가 아무 작업도 하지 않았는데 주기마다
+전체 상태를 저장하면 VDI 부하·네트워크·저장비용이 늘고, 감사 로그와 캐시 적중률도 반복 횟수에
+따라 부풀려진다. 따라서 관측은 **변경이 있을 때만 기록**하고, 같은 화면 안의 작은 변화는
+**변경분(delta)만 저장**한다.
+
+```
+UIA 변경 이벤트
+  → 디바운스·노이즈 제거
+  → 영향 화면/서브트리 캡처
+  → Local Privacy Gate
+  → 직전 상태와 비교
+      ├─ 첫 관측·화면 전환·구조 변경 → 전체 체크포인트
+      ├─ 동일 화면의 값/상태 변경     → 델타
+      └─ 의미 변화 없음               → 저장·전송 생략
+```
+
+| 구분 | 기록 정책 |
+|------|-----------|
+| 첫 관측·재접속 | 복원 기준이 되는 전체 체크포인트 |
+| URL route·레코드·구조 변경 | 새 체크포인트 + 필요 시 Adaptive Mapping 재추론 |
+| 입력값·검증 오류·업무 상태 변경 | 안정 노드 키 기준 `add/remove/replace` 델타 |
+| 포커스·커서·스크롤·로딩 애니메이션·시계 | 업무 의미가 없으면 폐기 |
+| 저장·제출·승인 동작 | 디바운스하지 않고 즉시 기록 |
+
+입력 중에는 글자마다 저장하지 않는다. 일반 변경은 마지막 이벤트 후 약 750ms에 합치고, 연속 입력도
+최대 3초마다 한 번만 기록한다. 이벤트 누락을 복구하기 위해 30~60초 주기의 저빈도 전체 확인을
+병행한다. 체크포인트는 화면 전환·구조 변경 외에도 델타 수 또는 시간이 임계치를 넘으면 다시 생성해
+복원 비용을 제한한다.
+
+델타 비교와 생성은 반드시 **Privacy Gate 이후**에 수행한다. 민감 필드는 원문 대신 마스킹 토큰과
+채움 여부만 남기고, 이전 값(`oldValue`)은 중복 보관하지 않는다. UIA 순회 순서로 붙는 임시 번호가
+아니라 `AutomationId + 상위 경로 + Role` 기반의 **안정 노드 키**를 사용해 노드 하나가 추가됐다고
+화면 전체가 변경된 것처럼 기록되는 것을 방지한다.
+
+> **단계적 전환:** 현재 Phase 1 구현은 일정 간격으로 전체 UIA 트리를 읽은 뒤 값 포함 지문으로
+> 변경 없음을 걸러낸다. 다음 단계에서 체크포인트+델타를 먼저 적용하고, 이후 UIA 이벤트 구독으로
+> 캡처 자체의 빈도까지 줄인다. 이벤트 구독이 불안정한 앱에서는 저빈도 폴링을 안전망으로 유지한다.
 
 ### UI Automation
 
@@ -775,6 +818,10 @@ Audit (불변 로그)
 
 Windows UI Automation
 
+UIA Change Listener (`FocusChanged`·`StructureChanged`·`PropertyChanged`·`Invoke`) + 디바운스
+
+Checkpoint/Delta Encoder + 최근 상태 캐시
+
 Microsoft Graph (Mail, 우선)
 
 Outlook COM (fallback)
@@ -789,7 +836,7 @@ Local Privacy Gate (PII 마스킹, 경량)
 
 ## Server (AWS, Tenant VPC)
 
-LLM : **Amazon Bedrock (Claude)**
+LLM : **Amazon Bedrock (Claude) 기본**, tenant 승인 시 **Vertex AI(ADC)** 또는 **Azure OpenAI(deployment endpoint)** 선택
 
 Embedding : Bedrock (Titan / Cohere)
 
@@ -840,10 +887,10 @@ Cho-Pilot은
 
 | 영역 | 정책 |
 |------|------|
-| 전송 경계 | 모든 데이터 테넌트 VPC 내부. Bedrock은 VPC Endpoint 경유(인터넷 미경유) |
-| LLM 데이터 | Bedrock 무학습 정책. 프롬프트/응답 로그 보존기간·암호화 |
+| 전송 경계 | Bedrock은 VPC Endpoint 경유(인터넷 미경유). Vertex/Azure는 승인된 project/resource·리전·private egress만 사용 |
+| LLM 데이터 | 공급자별 무학습·프롬프트/응답 보존 정책, 보존기간·암호화 |
 | 저장 | S3/Aurora SSE-KMS 암호화, 전송 TLS/mTLS |
-| 최소수집 | Privacy Gate에서 PII 마스킹, 화이트리스트 필드만 승격 |
+| 최소수집 | Privacy Gate에서 PII 마스킹, 화이트리스트 필드만 승격. 변경 없음은 폐기하고 동일 화면은 델타 우선 |
 | 동의/투명성 | 관측 범위 고지 UX, on/off·앱별 제외 |
 | 보존/파기 | 항목별 TTL, 사용자 삭제 요청 처리 경로 |
 | 접근/감사 | IAM 최소권한, 사용자별 격리, 전 액션 감사 |
@@ -855,6 +902,9 @@ Cho-Pilot은
 | 지표 | 목표(초기) |
 |------|-----------|
 | 관측 정확도 (UI→Business Object) | ≥ 90% |
+| 변경 없음 억제율 | ≥ 95% |
+| 전체 스냅숏 대비 평균 전송량 절감 | ≥ 70% |
+| 체크포인트+델타 상태 재구성 성공률 | 100% |
 | 연결 정밀도 (Entity Resolver) | Precision ≥ 0.9 |
 | 업무 인식 정확도 | ≥ 80% |
 | 자동화 성공률 | ≥ 95% |
@@ -904,6 +954,9 @@ LLM API 사용량이 대부분을 차지한다.
 Enterprise Web Agent
 
 - UI Automation
+- 변경 없음 억제(값 포함 지문) 및 안정 노드 키
+- 체크포인트+델타·상태 재구성·누락 시 전체 재동기화는 feature flag 단계 배포
+- UIA 이벤트 구독 + 디바운스는 앱별 검증 후 폴링에서 단계 전환
 - Vision
 - Workflow Guide
 
