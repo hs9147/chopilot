@@ -104,6 +104,13 @@ foreach (var mcp in cfg.GetSection("Foundation:Mcp").GetChildren())
 
 builder.Services.AddSingleton(sp => new FoundationStore(sp.GetServices<IFoundationSource>()));
 builder.Services.AddSingleton<FoundationReconciler>();
+builder.Services.AddSingleton(sp => new ProposalStore(sp.GetRequiredService<IJournalFactory>()));
+builder.Services.AddSingleton(sp => new ProposalEngine(
+    sp.GetRequiredService<ProposalStore>(),
+    sp.GetRequiredService<ObservationStore>(),
+    sp.GetRequiredService<UepStore>(),
+    sp.GetRequiredService<FoundationReconciler>(),
+    sp.GetRequiredService<DecisionLog>()));
 
 builder.Services.AddSingleton(sp => new AxisAggregator(
     sp.GetRequiredService<UnknownConceptLog>(),
@@ -706,6 +713,71 @@ app.MapPost("/v1/knowledge/aggregate",
     return payload is null
         ? Results.Conflict(new { error = "집계가 이미 실행 중이다 — 끝나면 다시 눌러라." })
         : Results.Ok(payload);
+});
+
+// ── 업무 개선 제안 ──────────────────────────────────────────────────────────
+// 지식 문서와 다른 통이다. 지식은 승인되면 시스템 동작이 바뀌고, 이건 승인해도 그대로다 —
+// 사람이 할 일에 대한 제안이라서. 한 통에 담으면 "승인"이 두 가지 뜻을 갖는다.
+app.MapGet("/v1/proposals", (ProposalStore store, ProposalEngine _, int? limit) =>
+{
+    var now = DateTimeOffset.UtcNow;
+    return Results.Ok(new
+    {
+        count = store.Count,
+        criteria = store.Current(now),
+        outcomes = store.Outcomes(),
+        items = store.Snapshot(limit ?? 200),
+    });
+});
+
+// 기준의 전 버전. 지금 값만 보면 자체 평가가 무엇을 근거로 조정했는지 알 수 없다.
+app.MapGet("/v1/proposals/criteria", (ProposalStore store) =>
+    Results.Ok(new { current = store.Current(DateTimeOffset.UtcNow), history = store.CriteriaHistory() }));
+
+// 자체 평가 → 생성. 한 번에 도는 이유: 기준을 갱신하지 않고 생성하면 지난 기준으로 뽑은 제안이
+// 새 기준으로 매겨진 것처럼 보인다. 겹쳐 들어오면 같은 제안을 두 번 만들므로 409로 끊는다.
+app.MapPost("/v1/proposals/generate",
+    async (HttpRequest request, ProposalEngine engine, SingleFlight inFlight, bool? tune) =>
+{
+    if (RequestUser.Require(request, out _) is { } unauthenticated)
+        return unauthenticated;
+
+    var payload = await inFlight.RunAsync("proposal_generate", () =>
+    {
+        var tuning = tune == false ? null : engine.Tune();
+        var generated = engine.Generate();
+        return Task.FromResult<object>(new
+        {
+            tuning,
+            criteriaVersion = generated.CriteriaVersion,
+            proposed = generated.Proposed,
+            // 떨어진 후보를 숨기면 제안 0건이 "근거가 없어서"인지 "기준이 높아서"인지 구분되지 않는다.
+            skipped = generated.Skipped,
+        });
+    });
+
+    return payload is null
+        ? Results.Conflict(new { error = "제안 생성이 이미 실행 중이다 — 끝나면 다시 눌러라." })
+        : Results.Ok(payload);
+});
+
+// 채택/기각. 이 결정이 다음 자체 평가의 유일한 입력이다 — 그래서 사유를 함께 받는다.
+app.MapPost("/v1/proposals/{id}/decide",
+    (string id, HttpRequest request, ProposalDecision body,
+     ProposalStore store, DecisionLog decisions) =>
+{
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
+
+    var status = body.Accept ? ProposalStatus.Accepted : ProposalStatus.Rejected;
+    var decided = store.Decide(id, status, actor, body.Note, DateTimeOffset.UtcNow);
+    if (decided is null)
+        return Results.NotFound(new { error = "그런 제안이 없거나 이미 결정됐다" });
+
+    decisions.Record($"proposal_{status}", actor, decided.Id, decided.Kind, decided.Score.Total,
+        $"{decided.Title}{(string.IsNullOrWhiteSpace(body.Note) ? "" : $" — {body.Note}")}");
+
+    return Results.Ok(decided);
 });
 
 // 작업 완료 신호 집계 (ARCHITECTURE §11). 필수 필드 규칙 개정의 근거다.

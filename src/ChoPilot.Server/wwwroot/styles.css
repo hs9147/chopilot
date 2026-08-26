@@ -96,6 +96,17 @@ main {
   border: 1px solid currentColor; border-radius: 8px;
   padding: 10px 12px; font-size: 13px; margin: 12px 0 0;
 }
+/* 제안 점수의 축별 분해. 총점만 보이면 왜 그 점수인지 되짚을 수 없다. */
+.dims { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.dim {
+  display: grid; grid-template-columns: 52px 120px 92px 1fr;
+  align-items: center; gap: 8px; font-size: 12px;
+}
+.dim-name { color: var(--muted); }
+.dim-bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
+.dim-bar > i { display: block; height: 100%; background: var(--accent); }
+.dim-val { font-family: var(--mono); }
+
 /* 제외된 추정 — 지워졌지만 이력에는 남는다. 살아 있는 행과 눈으로 구별되어야 한다. */
 .row-gone > td { opacity: .62; }
 

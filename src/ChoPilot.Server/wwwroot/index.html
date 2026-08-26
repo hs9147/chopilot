@@ -172,6 +172,44 @@
     <div id="foundationReconcile"></div>
   </section>
 
+  <!-- ⑨ 업무 개선 제안 -->
+  <section class="card" id="s-proposals">
+    <h2><span class="step">9</span> 업무 개선 제안 <span class="tag">작업 이력 → 제안 · 자체 평가</span></h2>
+    <p class="hint">
+      쌓인 작업 이력(화면 방문·전이·대사·보정)에서 <strong>사람이 할 일</strong>을 뽑는다.
+      ⑤ 지식과는 다른 통이다 — 지식은 승인되면 시스템 동작이 바뀌지만, 여기 제안은
+      <strong>승인해도 시스템은 그대로다</strong>.
+    </p>
+    <p class="hint">
+      <strong>LLM은 여기 없다.</strong> 후보 산출도 선정도 결정적 집계이고, 본문은 근거 숫자를
+      그대로 문장에 넣어 만든다. 모델이 문구를 쓰면 관측되지 않은 주장이 근거를 단 문장으로
+      섞여 들어오고, 읽는 사람은 그 둘을 구분할 수 없다.
+    </p>
+
+    <div class="actions">
+      <button id="proposalGenerate" class="btn btn-primary">자체 평가 → 제안 생성</button>
+      <span id="proposalMsg" class="hint"></span>
+    </div>
+
+    <h3>선정 기준 <span class="hint">— 결정이 쌓이면 스스로 고친다</span></h3>
+    <p class="hint">
+      제안은 네 축(근거·도달·최근성·영향)을 가중 합산한 점수와 종류별 문턱으로 걸러진다.
+      <strong>도달(몇 명)</strong>은 사생활 경계이기도 하다 — 한 사람의 관측만으로 만든 제안은
+      그 사람의 업무 습관을 팀에 드러낸다.
+    </p>
+    <div id="proposalCriteria" class="table-scroll"></div>
+
+    <h3>제안</h3>
+    <div id="proposals"></div>
+
+    <h3>탈락한 후보 <span class="hint">— 왜 제안되지 않았는지</span></h3>
+    <p class="hint">
+      제안이 0건일 때 <strong>근거가 없어서인지 기준이 높아서인지</strong> 구분되어야 한다.
+      조용히 자르면 "개선할 게 없다"로 읽힌다.
+    </p>
+    <div id="proposalSkipped" class="table-scroll"></div>
+  </section>
+
   <!-- ⑦ 스냅샷 -->
   <section class="card" id="s-snapshots">
     <h2><span class="step">7</span> 스냅샷별 상세 <span class="tag">H1 · H2 · H4</span></h2>

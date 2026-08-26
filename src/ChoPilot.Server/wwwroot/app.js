@@ -30,6 +30,10 @@ const state = {
   decisions: [],
   suggestions: null,
   concepts: [],
+  proposals: [],          // 업무 개선 제안(결정된 것 포함)
+  proposalCriteria: null, // 선정 기준 — 자체 평가가 고친다
+  proposalOutcomes: [],   // 종류별 채택률 — 자체 평가의 입력
+  proposalSkipped: [],    // 마지막 생성에서 떨어진 후보. 서버가 보관하지 않으므로 새로고침하면 사라진다
   inferences: null,       // AI 추정 이력(trusted 포함). null이면 측정자 미지정이라 안 불렀다
   inferenceTotal: 0,      // 서버가 자르기 전 개수 — 잘린 사실을 화면이 말해야 한다
   inferenceFilter: 'all', // all | pending | trusted | excluded
@@ -323,12 +327,12 @@ async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
            knowledge, signals, entities, foundation, reconcile, completions, storage, auth,
-           inferences] = await Promise.all([
+           proposals, inferences] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
       api('/v1/foundation'), api('/v1/foundation/reconcile'), api('/v1/completions?limit=1'),
-      api('/v1/storage'), api('/v1/auth'),
+      api('/v1/storage'), api('/v1/auth'), api('/v1/proposals?limit=100'),
       // 개인 스코프를 본인 것만 실으려면 주체가 필요하다 — 측정자가 비어 있으면 부르지 않는다.
       state.actor ? api('/v1/inferences?limit=200', asUser()) : Promise.resolve(null),
     ]);
@@ -339,6 +343,9 @@ async function refreshAll() {
     state.review = review.entries;
     state.screens = review.screens || {};        // 서명 → 그 화면에 실제로 보였던 필드
     state.thetaHigh = review.thetaHigh ?? 0.8;   // 신뢰도를 판정으로 바꾸는 기준선
+    state.proposals = proposals.items;
+    state.proposalCriteria = proposals.criteria;
+    state.proposalOutcomes = proposals.outcomes;
     state.inferences = inferences ? inferences.entries : null;   // null = 측정자 미지정
     state.inferenceTotal = inferences ? inferences.total : 0;    // 자르기 전 개수
     state.decisions = decisions.entries;
@@ -364,6 +371,9 @@ async function refreshAll() {
   renderMetrics();
   renderSignatures();
   renderReview();
+  renderProposalCriteria();
+  renderProposals();
+  renderProposalSkipped();
   renderInferences();
   renderDecisions();
   renderKnowledge();
@@ -479,6 +489,177 @@ function renderReview() {
   });
 
   renderCorrection();
+}
+
+/* ── 업무 개선 제안 ───────────────────────────────────── */
+
+const PROPOSAL_KIND = {
+  screen_split: '화면 갈림',
+  workflow_shortcut: '업무 흐름',
+  rework: '되돌아오기',
+  master_gap: '기준정보 결손',
+  correction_hotspot: '보정 집중',
+};
+
+const kindLabel = (k) => PROPOSAL_KIND[k] || k;
+
+function renderProposalCriteria() {
+  const box = $('proposalCriteria');
+  const c = state.proposalCriteria;
+  if (!c) { box.innerHTML = '<p class="empty">기준 없음</p>'; return; }
+
+  const outcomes = Object.fromEntries((state.proposalOutcomes || []).map((o) => [o.kind, o]));
+
+  const rows = c.rules.map((r) => {
+    const o = outcomes[r.kind];
+    // 채택률은 결정된 것 중의 비율이다. 결정이 없을 때 0%로 적으면 "전부 기각"으로 읽힌다.
+    const rate = o && o.decided > 0
+      ? `${pct(o.acceptanceRate)} <span class="hint">(${o.accepted}/${o.decided})</span>`
+      : `<span class="hint">결정 없음</span>`;
+    return `<tr class="${r.enabled ? '' : 'row-gone'}">
+      <td>${esc(kindLabel(r.kind))} <div class="hint mono">${esc(r.kind)}</div></td>
+      <td>${r.enabled
+        ? '<span class="badge badge-mask">켜짐</span>'
+        : `<span class="badge badge-leak">꺼짐</span><div class="hint">${esc(r.disabledReason || '이유 미기재')}</div>`}</td>
+      <td class="num">${r.minOccurrences}회</td>
+      <td class="num">${r.minDistinctUsers}명</td>
+      <td class="num">${r.minScore.toFixed(2)}</td>
+      <td class="num">${o ? o.proposed : 0}</td>
+      <td class="num">${rate}</td>
+    </tr>`;
+  }).join('');
+
+  box.innerHTML = `<p class="hint">
+      기준 <strong>v${c.version}</strong> · ${esc(c.updatedAt.slice(0, 16).replace('T', ' '))} —
+      ${esc(c.rationale)}<br>
+      가중치: 근거 ${c.evidenceWeight} · 도달 ${c.reachWeight} · 최근성 ${c.recencyWeight} · 영향 ${c.impactWeight}
+    </p>
+    <table>
+      <thead><tr>
+        <th>종류</th><th>상태</th><th class="num">최소 관측</th><th class="num">최소 인원</th>
+        <th class="num">최소 점수</th><th class="num">제안</th><th class="num">채택률</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderProposals() {
+  const box = $('proposals');
+  const items = state.proposals || [];
+  if (items.length === 0) {
+    box.innerHTML = '<p class="empty">아직 제안이 없다 — 위에서 생성해 보라</p>';
+    return;
+  }
+
+  box.innerHTML = items.map((p, i) => {
+    const ev = p.evidence;
+    const bars = p.score.dimensions.map((d) => `
+      <div class="dim">
+        <span class="dim-name">${esc(d.name)}</span>
+        <span class="dim-bar"><i style="width:${Math.round(d.value * 100)}%"></i></span>
+        <span class="dim-val">${d.value.toFixed(2)}<span class="hint"> ×${d.weight}</span></span>
+        <span class="hint">${esc(d.note)}</span>
+      </div>`).join('');
+
+    const decided = p.status !== 'proposed';
+    return `<div class="detail ${decided ? 'row-gone' : ''}">
+      <div class="detail-head">
+        <h3 style="margin:0">
+          <span class="badge">${esc(kindLabel(p.kind))}</span> ${esc(p.title)}
+        </h3>
+        <div>
+          ${decided
+            ? `<span class="badge ${p.status === 'accepted' ? 'badge-mask' : 'badge-leak'}">
+                 ${p.status === 'accepted' ? '채택' : '기각'}</span>
+               <span class="hint">${esc(p.decidedBy || '')} ${esc((p.decidedAt || '').slice(0, 16).replace('T', ' '))}</span>`
+            : `<span class="hint">점수 ${p.score.total.toFixed(2)} · 기준 v${p.criteriaVersion}</span>
+               <button class="btn btn-sm btn-primary" data-accept="${i}">채택</button>
+               <button class="btn btn-sm btn-ghost" data-reject="${i}">기각</button>`}
+        </div>
+      </div>
+      <p>${esc(p.body)}</p>
+      <p class="hint">
+        근거: <strong>${ev.occurrences}회</strong> · <strong>${ev.distinctUsers}명</strong> ·
+        ${esc(ev.firstSeen.slice(0, 10))} ~ ${esc(ev.lastSeen.slice(0, 10))} ·
+        <span class="mono">${ev.refs.map(esc).join(', ')}</span>
+      </p>
+      <div class="dims">${bars}</div>
+      ${p.decisionNote ? `<p class="hint">사유: ${esc(p.decisionNote)}</p>` : ''}
+    </div>`;
+  }).join('');
+
+  box.querySelectorAll('[data-accept]').forEach((b) =>
+    b.addEventListener('click', () => decideProposal(items[Number(b.dataset.accept)], true, b)));
+  box.querySelectorAll('[data-reject]').forEach((b) =>
+    b.addEventListener('click', () => decideProposal(items[Number(b.dataset.reject)], false, b)));
+}
+
+function renderProposalSkipped() {
+  const box = $('proposalSkipped');
+  const rows = state.proposalSkipped || [];
+  if (rows.length === 0) {
+    box.innerHTML = '<p class="empty">생성을 돌리면 탈락 사유가 여기 쌓인다 (새로고침하면 사라진다 — 서버가 보관하지 않는다)</p>';
+    return;
+  }
+  box.innerHTML = `<table>
+    <thead><tr><th>종류</th><th>대상</th><th class="num">점수</th><th>탈락 사유</th></tr></thead>
+    <tbody>${rows.map((s) => `<tr>
+      <td>${esc(kindLabel(s.kind))}</td>
+      <td class="mono">${esc(s.key)}</td>
+      <td class="num">${s.score.total.toFixed(2)}</td>
+      <td class="hint">${esc(s.reason)}</td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+async function generateProposals(button) {
+  const msg = $('proposalMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  await whileBusy(button, '평가·생성 중…', async () => {
+    try {
+      const r = await api('/v1/proposals/generate', {
+        method: 'POST',
+        headers: { 'X-ChoPilot-User': actor },
+      });
+      state.proposalSkipped = r.skipped;
+      const tuned = r.tuning && r.tuning.changes.length > 0;
+      msg.className = 'hint';
+      msg.textContent = `제안 ${r.proposed.length}건 · 탈락 ${r.skipped.length}건 · 기준 v${r.criteriaVersion}`
+        + (tuned ? ` — 자체 평가로 기준을 고쳤다: ${r.tuning.changes.map((c) => c.reason).join(' / ')}` : '');
+      await refreshAll();
+      renderProposalSkipped();
+    } catch (err) {
+      msg.className = 'warn';
+      msg.textContent = `생성 실패: ${err.message}`;
+    }
+  });
+}
+
+async function decideProposal(proposal, accept, button) {
+  const msg = $('proposalMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  // 기각 사유는 다음 자체 평가의 유일한 질적 입력이다 — 비워도 되지만 물어는 본다.
+  const note = accept ? null : prompt(`기각 사유 (선택) — "${proposal.title}"`, '');
+  if (!accept && note === null) return;   // 취소
+
+  await whileBusy(button, accept ? '채택 중…' : '기각 중…', async () => {
+    try {
+      await api(`/v1/proposals/${encodeURIComponent(proposal.id)}/decide`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-ChoPilot-User': actor },
+        body: JSON.stringify({ accept, note: note || null }),
+      });
+      msg.className = 'hint';
+      msg.textContent = `${accept ? '채택' : '기각'}됨 — 이 결정이 다음 자체 평가의 입력이 된다.`;
+      await refreshAll();
+    } catch (err) {
+      msg.className = 'warn';
+      msg.textContent = `결정 실패: ${err.message}`;
+    }
+  });
 }
 
 /* ── AI 추정 이력 ─────────────────────────────────────── */
@@ -1589,6 +1770,7 @@ function bind() {
     whileBusy(e.currentTarget, '집계 중…', () => aggregate(false)));
   $('foundationRefresh').addEventListener('click', (e) =>
     whileBusy(e.currentTarget, '갱신 중…', refreshFoundation));
+  $('proposalGenerate').addEventListener('click', (e) => generateProposals(e.currentTarget));
 
   for (const key of ['h1Total', 'h1Ok', 'h3Total', 'h3Ai', 'h3Base']) {
     const input = $(key);
