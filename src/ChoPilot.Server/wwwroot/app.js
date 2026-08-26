@@ -89,8 +89,33 @@ const saveSources = () => localStorage.setItem(SOURCES_KEY, JSON.stringify(state
 
 async function api(path, options) {
   const res = await fetch(path, options);
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(`${res.status} ${await errorText(res)}`);
   return res.json();
+}
+
+// 서버 오류는 {"error": "..."} 로 온다. 본문을 통째로 붙이면 사람이 읽는 자리에
+// `{"error":"..."}` 가 그대로 뜬다 — 필드만 뽑고, 그 모양이 아니면 원문을 쓴다.
+async function errorText(res) {
+  const body = await res.text();
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed.error === 'string') return parsed.error;
+  } catch { /* JSON이 아니면 원문 그대로 */ }
+  return body;
+}
+
+// 진행 중인 버튼을 잠그고 "…중"으로 바꾼다. 이건 피드백이지 가드가 아니다 —
+// 탭 두 개·새로고침·직접 호출은 그대로 들어오므로 중복을 실제로 막는 건 서버의 409다.
+async function whileBusy(button, label, work) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  try {
+    return await work();
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 
 /* ── 적재 ─────────────────────────────────────────────── */
@@ -447,11 +472,18 @@ function renderCorrection() {
   $('promoteEntry').addEventListener('click', () => promoteEntry(entry));
 }
 
+// 미지정은 실패 시점이 아니라 상시로 보여야 한다 — 버튼을 누른 뒤에야 알면 이미 늦다.
+function renderActor() {
+  $('actor').closest('.actor-field').classList.toggle('unset', !state.actor);
+}
+
 function requireActor(msgBox) {
   if (state.actor) return state.actor;
   msgBox.className = 'warn';
-  msgBox.textContent = '측정자 ID를 먼저 입력하라 — 누가 승인했는지 남지 않는 보정은 되돌릴 수 없다.';
-  $('actor').focus();
+  msgBox.textContent = '상단바의 측정자 ID를 먼저 입력하라 — 누가 승인했는지 남지 않는 보정은 되돌릴 수 없다.';
+  // focus()는 스크롤을 옮긴다. 측정자 칸은 상단바에 상시 보이므로 옮길 필요가 없고,
+  // 옮기면 방금 쓴 경고 문구가 화면 밖에 남는다 — 사용자는 이유 없이 튄 화면만 본다.
+  $('actor').focus({ preventScroll: true });
   return null;
 }
 
@@ -871,7 +903,7 @@ async function refreshFoundation() {
   if (!actor) return;
 
   msg.className = 'hint';
-  msg.textContent = '갱신 중…';
+  msg.textContent = '';        // 진행 표시는 버튼이 한다 — 지난 결과만 지운다
 
   try {
     const result = await api('/v1/foundation/refresh', {
@@ -1286,7 +1318,8 @@ function buildMarkdown() {
 function bind() {
   const drop = $('drop'), files = $('files');
 
-  drop.addEventListener('click', () => files.click());
+  // 입력 자신에서 온 클릭은 되쏘지 않는다 — 되쏘면 파일 선택창이 두 번 열린다.
+  drop.addEventListener('click', (e) => { if (e.target !== files) files.click(); });
   files.addEventListener('change', () => { uploadFiles(files.files); files.value = ''; });
 
   ['dragenter', 'dragover'].forEach((type) =>
@@ -1317,13 +1350,18 @@ function bind() {
   actor.addEventListener('input', () => {
     state.actor = actor.value.trim();
     localStorage.setItem(ACTOR_KEY, state.actor);
+    renderActor();
   });
   // 측정자가 바뀌면 personal 스코프 문서(내 프로파일)가 달라진다 — 입력이 멎으면 다시 읽는다.
   actor.addEventListener('change', refreshAll);
+  renderActor();
 
-  $('aggregatePreview').addEventListener('click', () => aggregate(true));
-  $('aggregateSubmit').addEventListener('click', () => aggregate(false));
-  $('foundationRefresh').addEventListener('click', refreshFoundation);
+  $('aggregatePreview').addEventListener('click', (e) =>
+    whileBusy(e.currentTarget, '미리보는 중…', () => aggregate(true)));
+  $('aggregateSubmit').addEventListener('click', (e) =>
+    whileBusy(e.currentTarget, '집계 중…', () => aggregate(false)));
+  $('foundationRefresh').addEventListener('click', (e) =>
+    whileBusy(e.currentTarget, '갱신 중…', refreshFoundation));
 
   for (const key of ['h1Total', 'h1Ok', 'h3Total', 'h3Ai', 'h3Base']) {
     const input = $(key);

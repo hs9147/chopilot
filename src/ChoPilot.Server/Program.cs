@@ -44,6 +44,7 @@ builder.Services.AddSingleton<IJournalFactory>(_ =>
 
 builder.Services.AddSingleton<IMappingCache>(sp =>
     new InMemoryMappingCache(sp.GetRequiredService<IJournalFactory>()));
+builder.Services.AddSingleton<SingleFlight>();
 builder.Services.AddSingleton<ObservationStore>();
 builder.Services.AddSingleton<AuditService>();
 builder.Services.AddSingleton(sp => new UepStore(sp.GetRequiredService<IJournalFactory>()));
@@ -491,26 +492,34 @@ app.MapGet("/v1/foundation", (FoundationStore foundation) =>
 
 // 출처 갱신 — 유일하게 밖으로 나가는 호출이라 사용자를 요구하고 결정 이력에 남긴다.
 // 관측된 키를 질의로 함께 넘긴다: 전량 덤프가 없는 무료 API는 "우리가 본 것"만 물어볼 수 있다.
+// 겹쳐 들어오면 외부 API를 두 번 때린다 — 무료 출처는 대개 일일 할당량이 있다. 두 번째는 거절한다.
 app.MapPost("/v1/foundation/refresh",
     async (HttpRequest request, FoundationStore foundation, EntityStore entities,
-           DecisionLog decisions, CancellationToken ct) =>
+           DecisionLog decisions, SingleFlight inFlight, CancellationToken ct) =>
 {
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
 
-    var results = await foundation.RefreshAsync(FoundationStore.QueryFrom(entities), ct);
-    var failed = results.Where(r => !r.Ok).ToList();
-
-    decisions.Record("foundation_refresh", actor, "foundation", "global", 1.0,
-        $"{results.Count}개 출처, 사실 {foundation.Master.Count}건, 실패 {failed.Count}건");
-
-    return Results.Ok(new
+    var payload = await inFlight.RunAsync("foundation_refresh", async () =>
     {
-        refreshed = results.Count,
-        facts = foundation.Master.Count,
-        failures = failed.Select(f => new { source = f.SourceId, error = f.Error }),
-        sources = foundation.Status(),
+        var results = await foundation.RefreshAsync(FoundationStore.QueryFrom(entities), ct);
+        var failed = results.Where(r => !r.Ok).ToList();
+
+        decisions.Record("foundation_refresh", actor, "foundation", "global", 1.0,
+            $"{results.Count}개 출처, 사실 {foundation.Master.Count}건, 실패 {failed.Count}건");
+
+        return new
+        {
+            refreshed = results.Count,
+            facts = foundation.Master.Count,
+            failures = failed.Select(f => new { source = f.SourceId, error = f.Error }),
+            sources = foundation.Status(),
+        };
     });
+
+    return payload is null
+        ? Results.Conflict(new { error = "출처 갱신이 이미 실행 중이다 — 끝나면 다시 눌러라." })
+        : Results.Ok(payload);
 });
 
 // 관측 ↔ 마스터 대사. unmatched만 경보다 — no_master·unverifiable은 대사가 성립하지 않은 것이다.
@@ -655,33 +664,48 @@ app.MapPost("/v1/knowledge", (HttpRequest request, KnowledgeDoc doc, KnowledgeSe
 // LLM은 여기 없다 — 결정적 집계만으로 초안이 만들어지고, AI는 본문 품질 개선(3단계)에만 쓰인다.
 app.MapPost("/v1/knowledge/aggregate",
     async (HttpRequest request, AxisAggregator aggregator, KnowledgeService svc,
-           IKnowledgeEditor editor, bool? dryRun, CancellationToken ct) =>
+           IKnowledgeEditor editor, SingleFlight inFlight, bool? dryRun, CancellationToken ct) =>
 {
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
 
-    var result = aggregator.Aggregate(DateTimeOffset.UtcNow);
+    // 미리보기는 게이트 밖이다 — 쓰지도, 밖으로 호출하지도 않는다. 제출이 도는 동안에도 봐야 한다.
     if (dryRun == true)
-        return Results.Ok(new { dryRun = true, drafts = result.Drafts, skipped = result.Skipped });
-
-    // 초안은 검수 큐로 들어갈 뿐 게시되지 않는다 — LLM/집계기 자동 게시는 없다.
-    var submitted = new List<KnowledgeDoc>();
-    var rejected = new List<string>();
-    foreach (var draft in result.Drafts)
     {
-        // 편집자는 본문만 바꾼다. 개념·민감 여부·규칙은 집계기가 만든 것을 그대로 쓴다 —
-        // LLM이 페이로드를 쓸 수 있으면 문서 편집이 마스킹 방어선으로 가는 주입 경로가 된다.
-        var body = await editor.DescribeAsync(draft, ct);
-        var (doc, error) = svc.Submit(draft with { Body = body }, "aggregator");
-        if (doc is not null) submitted.Add(doc); else rejected.Add($"{draft.Id}: {error}");
+        var preview = aggregator.Aggregate(DateTimeOffset.UtcNow);
+        return Results.Ok(new { dryRun = true, drafts = preview.Drafts, skipped = preview.Skipped });
     }
 
-    return Results.Ok(new
+    // 집계는 "이미 존재"를 Aggregate() 안에서 판정하는데, 그 판정은 Submit보다 앞선다.
+    // 그래서 겹쳐 들어오면 둘 다 같은 초안 목록을 만들고 초안 1건당 LLM을 두 번 부른 뒤에야
+    // 두 번째가 거부된다 — 중복 판정이 비용보다 뒤에 있다. 진입에서 끊는다.
+    var payload = await inFlight.RunAsync("knowledge_aggregate", async () =>
     {
-        submitted = submitted.Count,
-        drafts = submitted,
-        skipped = result.Skipped.Concat(rejected).ToList(),
+        var result = aggregator.Aggregate(DateTimeOffset.UtcNow);
+
+        // 초안은 검수 큐로 들어갈 뿐 게시되지 않는다 — LLM/집계기 자동 게시는 없다.
+        var submitted = new List<KnowledgeDoc>();
+        var rejected = new List<string>();
+        foreach (var draft in result.Drafts)
+        {
+            // 편집자는 본문만 바꾼다. 개념·민감 여부·규칙은 집계기가 만든 것을 그대로 쓴다 —
+            // LLM이 페이로드를 쓸 수 있으면 문서 편집이 마스킹 방어선으로 가는 주입 경로가 된다.
+            var body = await editor.DescribeAsync(draft, ct);
+            var (doc, error) = svc.Submit(draft with { Body = body }, "aggregator");
+            if (doc is not null) submitted.Add(doc); else rejected.Add($"{draft.Id}: {error}");
+        }
+
+        return new
+        {
+            submitted = submitted.Count,
+            drafts = submitted,
+            skipped = result.Skipped.Concat(rejected).ToList(),
+        };
     });
+
+    return payload is null
+        ? Results.Conflict(new { error = "집계가 이미 실행 중이다 — 끝나면 다시 눌러라." })
+        : Results.Ok(payload);
 });
 
 // 작업 완료 신호 집계 (ARCHITECTURE §11). 필수 필드 규칙 개정의 근거다.

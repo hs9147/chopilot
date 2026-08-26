@@ -50,7 +50,14 @@ body {
 }
 .topbar h1 { margin: 0; font-size: 19px; }
 .topbar .sub { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
-.topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar-right { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+
+/* 측정자 ID — 상단바의 전역 신원. 비어 있으면 클릭 시점이 아니라 지금 보여야 한다. */
+.actor-field { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.actor-field > span { color: var(--muted); }
+.actor-field input.text { min-width: 110px; }
+.actor-field.unset input.text { border-color: var(--warn); background: var(--warn-bg); }
+.actor-field.unset > span { color: var(--warn); font-weight: 600; }
 
 main {
   max-width: 1180px;
@@ -122,6 +129,15 @@ code { font-family: var(--mono); font-size: .9em; }
 }
 .drop p { margin: 3px 0; }
 .drop.over { border-color: var(--accent); background: var(--pass-bg); }
+/* 파일 입력을 hidden으로 감추면 탭 순서에서 빠져 키보드로는 ①단계에 도달할 방법이 없어진다.
+   시각적으로만 숨겨 네이티브 input의 포커스·키보드·스크린리더 시맨틱을 그대로 둔다. */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  margin: -1px; padding: 0; border: 0;
+  clip: rect(0 0 0 0); clip-path: inset(50%); overflow: hidden; white-space: nowrap;
+}
+/* 숨은 입력이 포커스를 받으면 드롭존이 대신 테두리로 알려준다 — 안 그러면 포커스가 사라진다. */
+.drop:focus-within { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
 .check { display: block; margin-top: 12px; font-size: 13px; }
 
 /* 지식 문서 본문 (markdown 조각) */
