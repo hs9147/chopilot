@@ -32,7 +32,8 @@ const state = {
   concepts: [],
   inferences: null,       // AI 추정 이력(trusted 포함). null이면 측정자 미지정이라 안 불렀다
   inferenceTotal: 0,      // 서버가 자르기 전 개수 — 잘린 사실을 화면이 말해야 한다
-  inferenceFilter: 'all', // all | pending | trusted
+  discarded: [],          // 제외된 판단(결정 이력에서). 캐시에 없으므로 inferences에는 안 들어온다
+  inferenceFilter: 'all', // all | pending | trusted | discarded
   screens: {},            // 서명 → 화면 필드(ref·라벨·값). AI 판단을 원본과 대조하는 데 쓴다
   thetaHigh: 0.8,         // 서버의 Mapping:ThetaHigh — 신뢰도 판정 기준선
   editing: null,          // 보정 중인 검수 큐 항목
@@ -340,6 +341,7 @@ async function refreshAll() {
     state.thetaHigh = review.thetaHigh ?? 0.8;   // 신뢰도를 판정으로 바꾸는 기준선
     state.inferences = inferences ? inferences.entries : null;   // null = 측정자 미지정
     state.inferenceTotal = inferences ? inferences.total : 0;    // 자르기 전 개수
+    state.discarded = inferences ? inferences.discarded : [];    // 제외돼 캐시에 없는 판단
     state.decisions = decisions.entries;
     state.suggestions = suggestions.stats;
     state.concepts = ontology.concepts;
@@ -491,60 +493,88 @@ function renderInferences() {
     box.innerHTML = '<p class="empty">상단바에 측정자 ID를 넣으면 보인다 — 개인 스코프는 본인 것만 싣는다</p>';
     return;
   }
-  if (state.inferences.length === 0) {
+  // 서 있는 추정이 없어도 제외 이력은 있을 수 있다 — 그때 "없다"고 하면 방금 한 제외가 지워진다.
+  if (state.inferences.length === 0 && (state.discarded || []).length === 0) {
     box.innerHTML = '<p class="empty">아직 서 있는 추정이 없다</p>';
     return;
   }
 
+  // 서 있는 판단과 제외된 판단을 한 줄기로 세운다. 제외된 것을 빼면 "아직 추론된 적 없음"과
+  // "방금 내가 제외함"이 화면에서 똑같이 보인다 — 이력이라는 이름이 무색해진다.
+  // 인덱스는 state.inferences 기준을 그대로 들고 다닌다. 필터된 배열로 다시 매기면
+  // "제외"가 화면에 보이는 행이 아니라 다른 추정을 지운다.
+  const live = state.inferences.map((e, i) => ({
+    kind: 'live', e, i,
+    // 사람이 만든 매핑(보정·승격)은 lastInferredAt이 null이다. 맨 뒤로 보내면
+    // 방금 내가 고친 것이 목록 끝에 처박힌다 — 서버 정렬과 같은 규칙을 쓴다.
+    at: e.lastInferredAt || '9999',
+  }));
+  const gone = (state.discarded || []).map((d) => ({ kind: 'discarded', d, at: d.at }));
+
   const FILTERS = [
     ['all', '전체', () => true],
-    ['pending', '검수 대기', (e) => e.status !== 'trusted'],
-    ['trusted', '채택됨', (e) => e.status === 'trusted'],
+    ['pending', '검수 대기', (r) => r.kind === 'live' && r.e.status !== 'trusted'],
+    ['trusted', '채택됨', (r) => r.kind === 'live' && r.e.status === 'trusted'],
+    ['discarded', '제외됨', (r) => r.kind === 'discarded'],
   ];
   const active = FILTERS.find((f) => f[0] === state.inferenceFilter) || FILTERS[0];
 
-  // 인덱스는 필터링 전 배열 기준으로 유지한다 — 필터를 바꾼 뒤 버튼이 다른 행을 가리키면
-  // "제외" 가 엉뚱한 추정을 지운다.
-  const shown = state.inferences
-    .map((e, i) => ({ e, i }))
-    .filter(({ e }) => active[2](e));
+  const all = [...live, ...gone].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const shown = all.filter(active[2]);
 
-  const chips = FILTERS.map(([key, label, pred]) => {
-    const n = state.inferences.filter(pred).length;
-    return `<button class="btn btn-sm ${key === active[0] ? '' : 'btn-ghost'}" data-filter="${key}">${label} ${n}</button>`;
-  }).join(' ');
+  const chips = FILTERS.map(([key, label, pred]) =>
+    `<button class="btn btn-sm ${key === active[0] ? '' : 'btn-ghost'}" data-filter="${key}">`
+    + `${label} ${all.filter(pred).length}</button>`).join(' ');
 
   // 잘린 사실을 적는다 — 침묵하는 절단은 "이게 전부"로 읽힌다.
   const truncated = state.inferenceTotal > state.inferences.length
-    ? `<span class="warn-text">전체 ${state.inferenceTotal}건 중 최근 ${state.inferences.length}건만 실렸다</span>`
-    : `전체 ${state.inferenceTotal}건`;
+    ? `<span class="warn-text">서 있는 추정 ${state.inferenceTotal}건 중 최근 ${state.inferences.length}건만 실렸다</span>`
+    : `서 있는 추정 ${state.inferenceTotal}건`;
 
-  const rows = shown.map(({ e, i }) => {
-    const screen = state.screens[e.signature];
-    const personal = e.scope.startsWith('personal:');
-    // LastInferredAt이 null이면 AI가 아니라 사람이 만든 매핑이다 — 그 구분이 이력의 요점이다.
+  const screenCell = (signature) => {
+    const screen = state.screens[signature];
+    return screen
+      ? `<strong>${esc(screen.title || screen.route)}</strong>
+         <div class="hint mono">${esc(screen.route)}</div>`
+      : `<span class="mono">${shortSig(signature)}</span>
+         <div class="hint">관측이 남아 있지 않다</div>`;
+  };
+
+  const scopeBadge = (scope) => scope.startsWith('personal:')
+    ? '<span class="badge">개인</span>'
+    : `<span class="badge">${esc(scope)}</span>`;
+
+  const rows = shown.map((row) => {
+    if (row.kind === 'discarded') {
+      const d = row.d;
+      return `<tr class="row-gone">
+        <td class="hint">${esc(d.at.slice(0, 16).replace('T', ' '))}</td>
+        <td>${screenCell(d.signature)}</td>
+        <td colspan="3" class="hint">${esc(d.detail)}</td>
+        <td><span class="badge badge-leak">제외됨</span> ${scopeBadge(d.scope)}
+          <div class="hint">${esc(d.actor)}</div></td>
+        <td class="hint">다음 관측에서 재추론</td>
+      </tr>`;
+    }
+
+    const e = row.e;
+    // lastInferredAt이 null이면 AI가 아니라 사람이 만든 매핑이다 — 그 구분이 이력의 요점이다.
     const when = e.lastInferredAt
       ? esc(e.lastInferredAt.slice(0, 16).replace('T', ' '))
       : '<span class="badge">사람이 만듦</span>';
 
     return `<tr>
       <td class="hint">${when}</td>
-      <td>
-        ${screen ? `<strong>${esc(screen.title || screen.route)}</strong>
-                    <div class="hint mono">${esc(screen.route)}</div>`
-                 : `<span class="mono">${shortSig(e.signature)}</span>
-                    <div class="hint">관측이 남아 있지 않다</div>`}
-      </td>
+      <td>${screenCell(e.signature)}</td>
       <td>${esc(e.businessObject)}</td>
       <td class="num">${e.mapping.length}</td>
       <td class="num">${confidenceCell(e.confidence)}</td>
       <td>${e.status === 'trusted'
         ? '<span class="badge badge-mask">채택됨</span>'
-        : '<span class="badge">검수 대기</span>'}
-        ${personal ? '<span class="badge">개인</span>' : `<span class="badge">${esc(e.scope)}</span>`}</td>
+        : '<span class="badge">검수 대기</span>'} ${scopeBadge(e.scope)}</td>
       <td>
-        <button class="btn btn-sm" data-edit="${i}">수정</button>
-        <button class="btn btn-sm btn-ghost" data-discard="${i}">제외</button>
+        <button class="btn btn-sm" data-edit="${row.i}">수정</button>
+        <button class="btn btn-sm btn-ghost" data-discard="${row.i}">제외</button>
       </td>
     </tr>`;
   }).join('');

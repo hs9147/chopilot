@@ -771,7 +771,7 @@ app.MapGet("/v1/review", (PersonalizationService svc, ObservationStore store, IC
 // 승격·보정으로 큐에서 빠진 판단도 계속 쓰이므로, 그것까지 보여야 서 있는 판단 전부가 보인다.
 app.MapGet("/v1/inferences",
     (HttpRequest request, PersonalizationService svc, ObservationStore store,
-     IConfiguration config, int? limit) =>
+     DecisionLog decisions, IConfiguration config, int? limit) =>
 {
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
@@ -781,6 +781,11 @@ app.MapGet("/v1/inferences",
     {
         entries = ledger.Entries,
         total = ledger.Total,          // 자르기 전 개수 — 몇 건이 잘렸는지 화면이 말할 수 있어야 한다
+
+        // 제외된 판단은 캐시에서 사라지므로 entries에 없다. 그것까지 빼면 "아직 추론된 적 없음"과
+        // "방금 내가 제외함"이 화면에서 똑같이 보인다 — 이력이라는 이름이 무색해진다.
+        discarded = decisions.ByAction("inference_discard", limit ?? 200),
+
         screens = MeasurementViews.ScreensBySignature(store.List()),
         thetaHigh = config.GetValue("Mapping:ThetaHigh", 0.8),
     });

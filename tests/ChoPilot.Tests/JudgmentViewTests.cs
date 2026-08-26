@@ -267,6 +267,61 @@ public class InferenceHistoryTests
         Assert.Equal(3, page.GetProperty("total").GetInt32());
     }
 
+    // 제외하면 캐시에서 사라져 entries에 없다. 그것까지 빼면 "아직 추론된 적 없음"과
+    // "방금 내가 제외함"이 화면에서 똑같이 보인다 — 이력이라는 이름이 무색해진다.
+    [Fact]
+    public async Task Discard_StaysInTheLedgerAfterTheEntryIsGone()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var before = await Inferences(client, "hong");
+        var signature = before.GetProperty("entries").EnumerateArray()
+            .First().GetProperty("signature").GetString()!;
+        Assert.Empty(before.GetProperty("discarded").EnumerateArray());
+
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "hong",
+            new PromoteRequest(signature, "global")));
+
+        var after = await Inferences(client, "hong");
+        Assert.Empty(after.GetProperty("entries").EnumerateArray());          // 캐시에서는 사라졌고
+        var gone = Assert.Single(after.GetProperty("discarded").EnumerateArray());
+        Assert.Equal(signature, gone.GetProperty("signature").GetString());   // 이력에는 남는다
+        Assert.Equal("hong", gone.GetProperty("actor").GetString());
+    }
+
+    // Snapshot(n)으로 받아 거르면 최근 n건 안에 제외가 없을 때 조용히 빈 목록이 된다.
+    [Fact]
+    public async Task DiscardHistory_SurvivesABurstOfOtherDecisions()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+
+        await client.PostAsJsonAsync("/v1/observations", Event("e0", "https://proc/s0/create"));
+        var first = await Inferences(client, "hong");
+        var signature = first.GetProperty("entries").EnumerateArray()
+            .First().GetProperty("signature").GetString()!;
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "hong",
+            new PromoteRequest(signature, "global")));
+
+        // 제외 뒤에 다른 결정이 잔뜩 쌓인다
+        for (var i = 1; i <= 12; i++)
+        {
+            await client.PostAsJsonAsync("/v1/observations", Event($"e{i}", $"https://proc/s{i}/create"));
+            var ledger = await Inferences(client, "hong");
+            var sig = ledger.GetProperty("entries").EnumerateArray()
+                .First(e => e.GetProperty("status").GetString() == "pending_review")
+                .GetProperty("signature").GetString()!;
+            await client.SendAsync(As(HttpMethod.Post, "/v1/review/promote", "hong",
+                new PromoteRequest(sig, "global", 1.0)));
+        }
+
+        var final = await Inferences(client, "hong");
+        Assert.Contains(final.GetProperty("discarded").EnumerateArray(),
+            d => d.GetProperty("signature").GetString() == signature);
+    }
+
     [Fact]
     public async Task Discard_RefusesAnotherPersonsPersonalScope()
     {
