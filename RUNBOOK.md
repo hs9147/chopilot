@@ -124,6 +124,8 @@ UseBedrock=true Aws__Region=ap-northeast-2 dotnet run --project src/ChoPilot.Ser
 
 ## 4. 관측을 넣는 두 가지 길
 
+실측(Windows UIA)과 재생(콘솔). Windows에서 처음부터 훑는 순서는 §5에 따로 있다.
+
 ### 4.1 Windows 실측 — `chopilot-dump`
 
 **원클릭.** 빌드 산출물의 `chopilot-watch.cmd`를 더블클릭하면 10초 간격 자동 관측이 시작된다.
@@ -178,7 +180,114 @@ chopilot-dump --completed --upload                        # 저장 버튼 직후
 
 ---
 
-## 5. 5분 점검 절차
+## 5. Windows에서 처음부터 — 순서대로
+
+관측은 Windows에서만 된다(UIA). 서버와 콘솔은 어디서 돌아도 되지만, 아래는 **한 대에서 전부**
+돌리는 가장 짧은 경로다. VDI 안에서 이 순서대로 하면 된다.
+
+### ① .NET 8 SDK
+
+```powershell
+dotnet --version    # 8.x 가 나오면 건너뛴다
+```
+
+없으면 관리자 권한 없이 사용자 로컬 설치:
+
+```powershell
+iwr https://dot.net/v1/dotnet-install.ps1 -OutFile $env:TEMP\dotnet-install.ps1
+& $env:TEMP\dotnet-install.ps1 -Channel 8.0 -InstallDir $env:LOCALAPPDATA\Microsoft\dotnet
+$env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
+```
+
+### ② 빌드
+
+```powershell
+git clone https://github.com/hs9147/chopilot.git
+cd chopilot
+dotnet build ChoPilot.sln -c Release
+```
+
+Windows에서만 솔루션 전체(클라이언트 포함)가 빌드된다. Linux/macOS는 `ChoPilot.Client`가
+`net8.0-windows`라 제외된다.
+
+### ③ 서버 띄우기
+
+```powershell
+dotnet run --project src\ChoPilot.Server
+```
+
+`http://localhost:5080` 에서 측정 콘솔이 뜬다. **이 창은 켜 둔 채로** 다음 단계로 간다.
+
+영속화까지 켜려면(재시작에도 지식·캐시가 남는다):
+
+```powershell
+$env:Storage__Path = "$env:LOCALAPPDATA\ChoPilot\store"
+dotnet run --project src\ChoPilot.Server
+```
+
+### ④ 클라이언트에 서버 주소 알려주기
+
+같은 PC면 기본값(`http://127.0.0.1:5080`)이라 생략해도 된다.
+다른 PC의 서버를 볼 때만:
+
+```powershell
+copy src\ChoPilot.Client\appsettings.local.example.json src\ChoPilot.Client\appsettings.local.json
+notepad src\ChoPilot.Client\appsettings.local.json
+```
+```jsonc
+{ "Server": { "IngestionEndpoint": "http://<서버IP>:5080" } }
+```
+
+이 파일은 `.gitignore` 대상이라 커밋되지 않는다.
+
+### ⑤ 관측 — 원클릭
+
+탐색기에서 빌드 산출물 폴더를 열고 **`chopilot-watch.cmd` 를 더블클릭**한다.
+
+```
+src\ChoPilot.Client\bin\Release\net8.0\chopilot-watch.cmd
+```
+
+5초 뒤부터 10초 간격으로 포그라운드 창을 관측한다. **그 5초 안에 Procurement 화면을 앞으로
+두면 된다.** 화면이 그대로면 보내지 않는다. 중단은 Ctrl+C 또는 창 닫기.
+
+간격을 바꾸려면 실행 전에:
+
+```powershell
+$env:CHOPILOT_WATCH_SECONDS = "30"
+```
+
+### ⑥ 관측 — 명령줄
+
+```powershell
+# 한 번만
+dotnet run --project src\ChoPilot.Client -- --delay 5 --upload
+
+# 자동 반복
+dotnet run --project src\ChoPilot.Client -- --watch --upload
+
+# 저장 버튼을 누른 직후 (작업 완료 신호) — 반복 모드와 함께 쓸 수 없다
+dotnet run --project src\ChoPilot.Client -- --delay 3 --completed --upload
+```
+
+배포용으로 한 폴더에 모으려면:
+
+```powershell
+dotnet publish src\ChoPilot.Client -c Release -o C:\ChoPilot
+C:\ChoPilot\chopilot-watch.cmd        # 원클릭
+C:\ChoPilot\chopilot-dump.exe --watch --upload
+```
+
+### ⑦ 확인
+
+브라우저에서 `http://localhost:5080` 을 열고 ② 지표가 올라가는지 본다.
+상단 배지 두 개(`인증 없음` / `인메모리` 여부)로 지금 어떤 모드인지 항상 알 수 있다.
+
+관측이 안 잡히면 §8 트러블슈팅의 "트리에 값이 거의 안 잡힘" 항목부터 본다.
+
+---
+
+## 6. 5분 점검 절차
 
 서버를 띄운 직후 이 순서로 확인하면 전 구간이 살아 있는지 알 수 있다.
 
@@ -209,7 +318,7 @@ curl -s -H "$U" -X POST "$H/v1/knowledge/aggregate?dryRun=true"   # 어떤 지�
 
 ---
 
-## 6. 지식 루프 한 바퀴 돌려보기
+## 7. 지식 루프 한 바퀴 돌려보기
 
 ```bash
 H=http://localhost:5080; U="X-ChoPilot-User: ops"
@@ -232,7 +341,7 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 
 ---
 
-## 7. 자주 걸리는 것
+## 8. 자주 걸리는 것
 
 | 증상 | 원인 · 조치 |
 |---|---|
@@ -244,6 +353,9 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 | 부팅 로그에 `N줄을 건너뛰었다` | 쓰기 도중 종료된 흔적. 그 줄만 폐기됐고 나머지는 무사하다 |
 | 관측 POST가 400 | 계약 위반이다. 응답 `detail`에 사유가 있다(`tree.children 없음`, `privacy.maskedRefs 없음` 등) |
 | 스풀에 `*.bad`가 쌓임 | 서버가 영구 거부(4xx)한 이벤트다. `detail`을 보고 클라이언트를 고쳐라 |
+| 트리에 값이 거의 안 잡힘 | 브라우저 접근성 트리 미노출. 대상 창을 **실제 포그라운드**로 두어라. Chrome은 자동 활성이지만 안 되면 `--force-renderer-accessibility`로 실행 |
+| `chopilot-watch.cmd` 더블클릭 시 창이 바로 닫힘 | `chopilot-dump.exe`가 옆에 없다. `dotnet build` 산출물 폴더(`bin\...\net8.0\`)에서 실행하거나 `dotnet publish -o` 로 한 폴더에 모아라 |
+| Windows에서 `dotnet build` 실패 (NETSDK1073 등) | Linux/macOS에서 솔루션 전체를 빌드하려 한 것이다. 클라이언트는 `net8.0-windows`라 Windows에서만 빌드된다 |
 | `--watch`가 계속 "변화 없음"만 찍음 | 정상이다 — 화면이 그대로면 보내지 않는다. 강제로 보내려면 `--resend-unchanged` |
 | `--watch`가 "관측 중단"만 찍음 | 동의 게이트가 막고 있다. `Consent:Enabled`와 제외 목록을 확인하라 |
 | `--completed --watch`가 거부됨 | 의도된 것이다. 완료 신호는 저장 직후 한 번만 따로 실행한다 |
@@ -252,7 +364,7 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 
 ---
 
-## 8. 지금 검증되지 않은 것
+## 9. 지금 검증되지 않은 것
 
 정직하게 적어 둔다. 아래는 코드가 없는 게 아니라 **이 환경에서 실행해 보지 못한** 것들이다.
 

@@ -43,14 +43,22 @@ dotnet build
 
 우선순위(뒤가 우선): `appsettings.json` → `appsettings.local.json` → 환경변수 `CHOPILOT_*`
 
+클라이언트(`chopilot-dump`) 설정:
+
 | 키 | 기본값 | 설명 |
 |----|--------|------|
-| `Aws:Region` | ap-northeast-2 | Bedrock 리전 |
-| `Aws:BedrockModelId` | anthropic.claude-3-5-... | 테넌트 가용 모델 ID로 교체 |
+| `Server:IngestionEndpoint` | (비어 있음 → `http://127.0.0.1:5080`) | `--upload` 대상 서버 |
+| `Aws:Region` | us-east-1 | Bedrock 리전 |
+| `Aws:BedrockModelId` | us.anthropic.claude-haiku-4-5-20251001-v1:0 | **inference profile ID**(`us.`/`global.` 접두) |
 | `Mapping:ThetaHigh` | 0.8 | 캐시 채택/승격 신뢰도 임계치 |
 | `Mapping:OrgId` | default | Shared Plane org 스코프(D5) |
 | `Privacy:PolicyVersion` | 1.0 | Privacy Gate 정책 버전 |
 | `Observation:MaxDepth` / `MaxNodes` | 25 / 4000 | 트리 수집 상한 |
+| `Consent:Enabled` | true | 관측 전역 on/off |
+| `Consent:ExcludedApps` / `ExcludedUrlPatterns` | `[]` | 관측 제외 목록. **매 회차 다시 평가된다** |
+
+> 서버(`ChoPilot.Server`) 설정 — `Auth`·`Storage`·`Foundation`·`Knowledge` — 은
+> [RUNBOOK.md](RUNBOOK.md) §3에 따로 정리돼 있다. 클라이언트와 별개 파일이다.
 
 **로컬 오버라이드:**
 ```bash
@@ -61,7 +69,9 @@ cp src/ChoPilot.Client/appsettings.local.example.json src/ChoPilot.Client/appset
 ```bash
 # 구분자는 이중 밑줄(__)
 export CHOPILOT_Aws__Region=us-east-1
-export CHOPILOT_Aws__BedrockModelId=anthropic.claude-3-5-sonnet-20240620-v1:0
+# base ID가 아니라 inference profile ID다 (아래 §4 경고 참조)
+export CHOPILOT_Aws__BedrockModelId=us.anthropic.claude-haiku-4-5-20251001-v1:0
+export CHOPILOT_Server__IngestionEndpoint=http://10.0.0.5:5080
 ```
 
 ---
@@ -105,7 +115,7 @@ aws bedrock list-foundation-models --region us-east-1 --by-provider anthropic
 
 ```bash
 # 순수 로직 테스트 (Windows/AWS 불요)
-dotnet test
+dotnet test tests/ChoPilot.Tests/ChoPilot.Tests.csproj
 
 # UIA 관측 (Windows) — 3초 안에 대상 브라우저 화면을 포그라운드로
 dotnet run --project src/ChoPilot.Client -- --delay 3 --out out/pr_create.snapshot.json --baseline
@@ -114,7 +124,12 @@ dotnet run --project src/ChoPilot.Client -- --delay 3 --out out/pr_create.snapsh
 dotnet run --project src/ChoPilot.Client -- --delay 3 --bedrock
 ```
 
-산출 JSON은 [PHASE0-KIT.md](PHASE0-KIT.md) §2/§3 측정의 원자료로 사용한다.
+산출 JSON은 [PHASE0-KIT.md](PHASE0-KIT.md) §2/§3 측정의 원자료로 사용하고,
+측정 콘솔에 끌어다 놓으면 그대로 재생된다.
+
+> **서버·콘솔·자동 관측을 포함한 실행 절차는 [RUNBOOK.md](RUNBOOK.md)에 있다.**
+> Windows에서 처음부터 훑는 순서는 §5, 원클릭(`chopilot-watch.cmd`)은 §4.1.
+> 이 문서는 **환경 설정**까지만 다룬다.
 
 ---
 
