@@ -58,6 +58,56 @@ public sealed class PersonalizationService
             .Take(limit)
             .ToList();
 
+    /// <summary>
+    /// AI 추정 이력 — 지금 캐시에 서 있는 판단 전부를 <b>최근 추론순</b>으로.
+    ///
+    /// <para>
+    /// 검수 큐와 다르다. 검수 큐는 "손봐야 하는 것"만(θ 미만) 신뢰도 낮은 순으로 주는 작업 목록이고,
+    /// 이쪽은 <b>trusted까지 포함한 대장</b>이다. 승격·보정으로 큐에서 빠진 판단은 큐에서 사라지지만
+    /// 계속 쓰이므로, 그것까지 보이지 않으면 "AI가 무엇을 결정해 두었나"를 볼 방법이 없다.
+    /// </para>
+    /// <para>
+    /// 개인 스코프는 <b>본인 것만</b> 보인다. 공용 평면은 모두가 보지만, 남의 개인 매핑이 실리면
+    /// 검수 큐에서 막아 둔 격리가 이 목록으로 새는 것과 같다.
+    /// </para>
+    /// </summary>
+    public IReadOnlyList<MappingEntry> Inferences(string userId, int limit = 200) =>
+        _cache.All()
+            .Where(e => !e.Scope.StartsWith("personal:", StringComparison.Ordinal)
+                        || e.Scope == PersonalScope(userId))
+            // 사람이 만든 매핑(보정·승격)은 LastInferredAt이 null이다 — 맨 뒤가 아니라 맨 앞이어야
+            // "방금 내가 고친 것"이 보인다. 그래서 null을 현재로 취급한다.
+            .OrderByDescending(e => e.LastInferredAt ?? DateTimeOffset.MaxValue)
+            .Take(limit)
+            .ToList();
+
+    /// <summary>
+    /// 추정 제외 — 캐시에서 지운다. 지운 엔트리를 돌려주고, 없거나 권한이 없으면 null.
+    ///
+    /// <para>
+    /// 되돌리는 것이 아니라 <b>다시 묻게 하는</b> 것이다. 엔트리가 사라지면 재추론 백오프의 기준도
+    /// 함께 사라지므로 다음 관측에서 곧바로 AI를 다시 부른다 — <b>추론 비용이 다시 난다</b>.
+    /// 판단이 틀렸을 때 쓰는 것이지, 마음에 안 들 때 누르는 버튼이 아니다.
+    /// </para>
+    /// <para>
+    /// 남의 개인 스코프는 지울 수 없다. 공용 평면은 누구든 지울 수 있고 결정 이력에 남는다 —
+    /// 공용 판단을 지우는 것은 모두에게 영향이 가므로 누가 했는지가 증거로 남아야 한다.
+    /// </para>
+    /// </summary>
+    public MappingEntry? Discard(string signature, string scope, string userId)
+    {
+        if (scope.StartsWith("personal:", StringComparison.Ordinal) && scope != PersonalScope(userId))
+            return null;
+
+        var entry = _cache.Get(signature, scope);
+        if (entry is null) return null;
+
+        _cache.Remove(signature, scope);
+        return entry;
+    }
+
+    private static string PersonalScope(string userId) => $"personal:{userId}";
+
     /// <summary>검수 통과분을 trusted로 승격. 대상이 없으면 null.</summary>
     public MappingEntry? Promote(PromoteRequest req)
     {

@@ -767,6 +767,43 @@ app.MapGet("/v1/review", (PersonalizationService svc, ObservationStore store, IC
         thetaHigh = config.GetValue("Mapping:ThetaHigh", 0.8),
     }));
 
+// AI 추정 이력 — 검수 큐가 "손봐야 하는 것"이라면 이쪽은 trusted까지 포함한 대장이다.
+// 승격·보정으로 큐에서 빠진 판단도 계속 쓰이므로, 그것까지 보여야 서 있는 판단 전부가 보인다.
+app.MapGet("/v1/inferences",
+    (HttpRequest request, PersonalizationService svc, ObservationStore store,
+     IConfiguration config, int? limit) =>
+{
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
+
+    return Results.Ok(new
+    {
+        entries = svc.Inferences(actor, limit ?? 200),
+        screens = MeasurementViews.ScreensBySignature(store.List()),
+        thetaHigh = config.GetValue("Mapping:ThetaHigh", 0.8),
+    });
+});
+
+// 추정 제외 — 되돌리는 게 아니라 다시 묻게 하는 것이다. 엔트리가 사라지면 재추론 백오프의
+// 기준도 사라져 다음 관측에서 곧바로 AI를 다시 부른다. 공용 평면을 지우면 모두에게 영향이
+// 가므로 누가 지웠는지 결정 이력에 남긴다.
+app.MapPost("/v1/inference/discard",
+    (HttpRequest request, PromoteRequest req, PersonalizationService svc, DecisionLog decisions) =>
+{
+    if (RequestUser.Require(request, out var actor) is { } unauthenticated)
+        return unauthenticated;
+
+    var discarded = svc.Discard(req.Signature, req.Scope, actor);
+    if (discarded is null)
+        return Results.NotFound(new { error = "그 스코프에 지울 추정이 없다" });   // 남의 개인 매핑도 여기로 떨어진다
+
+    decisions.Record("inference_discard", actor, discarded.Signature, discarded.Scope,
+        discarded.Confidence,
+        $"{discarded.BusinessObject} 필드 {discarded.Mapping.Count}개 제외 — 다음 관측에서 재추론된다");
+
+    return Results.Ok(new { discarded = true, discarded.Signature, discarded.Scope });
+});
+
 // 검수 통과분을 trusted로 승격(HITL). 누가 승인했는지 결정 이력에 남긴다.
 app.MapPost("/v1/review/promote",
     (HttpRequest request, PromoteRequest req, PersonalizationService svc, DecisionLog decisions) =>

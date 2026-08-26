@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using ChoPilot.Core;
@@ -128,5 +129,149 @@ public class JudgmentViewTests
         // 시각도 함께 온다 — 축적이 사흘치인지 3분치인지는 시각 없이는 알 수 없다.
         foreach (var o in list.GetProperty("items").EnumerateArray())
             Assert.NotEqual(default, o.GetProperty("capturedAt").GetDateTimeOffset());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI 추정 이력 — 서 있는 판단의 대장, 그리고 그것을 제외하는 길.
+// ─────────────────────────────────────────────────────────────────────────────
+public class InferenceHistoryTests
+{
+    private static ObservationEvent Event(string id, string url = "https://proc/pr/create") => new(
+        EventId: id, SessionId: "s", UserId: "hong",
+        CapturedAt: DateTimeOffset.UtcNow,
+        Screen: new ScreenInfo(url, "구매요청 등록", null),
+        Tree: new UiNode("n1", "Window", "구매요청 등록", null, "prCreate", new()
+        {
+            new("n2", "Edit", "거래처", "㈜대한", "txtVendor", new()),
+        }),
+        Privacy: new PrivacyInfo("1.0", new()));
+
+    private static HttpRequestMessage As(HttpMethod method, string url, string user, object? body = null)
+    {
+        var req = new HttpRequestMessage(method, url);
+        req.Headers.Add(RequestUser.Header, user);
+        if (body is not null) req.Content = JsonContent.Create(body);
+        return req;
+    }
+
+    private static async Task<JsonElement> Inferences(HttpClient client, string user) =>
+        JsonDocument.Parse(await (await client.SendAsync(As(HttpMethod.Get, "/v1/inferences", user)))
+            .Content.ReadAsStringAsync()).RootElement;
+
+    // 개인 스코프를 본인 것만 싣는 판단을 하려면 주체가 필요하다.
+    [Fact]
+    public async Task Inferences_RequireAPrincipal()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var response = await server.CreateClient().GetAsync("/v1/inferences");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    // 검수 큐는 승격되면 사라진다. 그 판단은 계속 쓰이므로 대장에는 남아야 한다.
+    [Fact]
+    public async Task Inferences_KeepPromotedEntriesThatTheReviewQueueDrops()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var pending = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        var entry = pending.GetProperty("entries").EnumerateArray().First();
+        var signature = entry.GetProperty("signature").GetString()!;
+
+        await client.SendAsync(As(HttpMethod.Post, "/v1/review/promote", "hong",
+            new PromoteRequest(signature, "global", 1.0)));
+
+        var afterQueue = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        Assert.Empty(afterQueue.GetProperty("entries").EnumerateArray());     // 큐에서는 빠지고
+
+        var history = await Inferences(client, "hong");
+        var kept = Assert.Single(history.GetProperty("entries").EnumerateArray());
+        Assert.Equal("trusted", kept.GetProperty("status").GetString());      // 대장에는 남는다
+    }
+
+    // 검수 큐에서 막아 둔 격리가 이 목록으로 새면 안 된다.
+    [Fact]
+    public async Task Inferences_ShowOnlyTheRequestersOwnPersonalScope()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var pending = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        var signature = pending.GetProperty("entries").EnumerateArray()
+            .First().GetProperty("signature").GetString()!;
+
+        await client.SendAsync(As(HttpMethod.Post, "/v1/correction", "hong",
+            new CorrectionRequest(signature, "PurchaseRequest",
+                new List<CorrectionField> { new("n2", "거래처") })));
+
+        var mine = await Inferences(client, "hong");
+        Assert.Contains(mine.GetProperty("entries").EnumerateArray(),
+            e => e.GetProperty("scope").GetString() == "personal:hong");
+
+        var theirs = await Inferences(client, "kim");
+        Assert.DoesNotContain(theirs.GetProperty("entries").EnumerateArray(),
+            e => e.GetProperty("scope").GetString()!.StartsWith("personal:", StringComparison.Ordinal));
+    }
+
+    // 제외는 되돌리기가 아니라 "다시 물어라"다 — 엔트리와 함께 재추론 백오프의 기준도 사라진다.
+    [Fact]
+    public async Task Discard_MakesTheNextObservationInferAgain()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+        await client.PostAsJsonAsync("/v1/observations", Event("e2"));
+
+        var before = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
+        Assert.Equal(new[] { "ai", "deferred_cache" }, before.GetProperty("items").EnumerateArray()
+            .Select(o => o.GetProperty("source").GetString()));
+
+        var signature = before.GetProperty("items").EnumerateArray()
+            .First().GetProperty("signature").GetString()!;
+
+        var discard = await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "hong",
+            new PromoteRequest(signature, "global")));
+        Assert.Equal(HttpStatusCode.OK, discard.StatusCode);
+
+        await client.PostAsJsonAsync("/v1/observations", Event("e3"));
+        var after = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
+        Assert.Equal("ai", after.GetProperty("items").EnumerateArray()
+            .Last().GetProperty("source").GetString());
+
+        // 공용 판단을 지우는 것은 모두에게 가므로 누가 했는지가 증거로 남아야 한다.
+        var decisions = await client.GetFromJsonAsync<JsonElement>("/v1/decisions");
+        Assert.Contains(decisions.GetProperty("entries").EnumerateArray(),
+            d => d.GetProperty("action").GetString() == "inference_discard"
+                 && d.GetProperty("actor").GetString() == "hong");
+    }
+
+    [Fact]
+    public async Task Discard_RefusesAnotherPersonsPersonalScope()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var pending = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        var signature = pending.GetProperty("entries").EnumerateArray()
+            .First().GetProperty("signature").GetString()!;
+
+        await client.SendAsync(As(HttpMethod.Post, "/v1/correction", "hong",
+            new CorrectionRequest(signature, "PurchaseRequest",
+                new List<CorrectionField> { new("n2", "거래처") })));
+
+        var response = await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "kim",
+            new PromoteRequest(signature, "personal:hong")));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);   // 존재 여부도 알려주지 않는다
+
+        // 그리고 실제로 지워지지 않았다
+        var mine = await Inferences(client, "hong");
+        Assert.Contains(mine.GetProperty("entries").EnumerateArray(),
+            e => e.GetProperty("scope").GetString() == "personal:hong");
     }
 }

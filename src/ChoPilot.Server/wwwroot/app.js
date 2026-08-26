@@ -30,6 +30,7 @@ const state = {
   decisions: [],
   suggestions: null,
   concepts: [],
+  inferences: null,       // AI 추정 이력(trusted 포함). null이면 측정자 미지정이라 안 불렀다
   screens: {},            // 서명 → 화면 필드(ref·라벨·값). AI 판단을 원본과 대조하는 데 쓴다
   thetaHigh: 0.8,         // 서버의 Mapping:ThetaHigh — 신뢰도 판정 기준선
   editing: null,          // 보정 중인 검수 큐 항목
@@ -318,12 +319,15 @@ const asUser = () => (state.actor ? { headers: { 'X-ChoPilot-User': state.actor 
 async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
-           knowledge, signals, entities, foundation, reconcile, completions, storage, auth] = await Promise.all([
+           knowledge, signals, entities, foundation, reconcile, completions, storage, auth,
+           inferences] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
       api('/v1/foundation'), api('/v1/foundation/reconcile'), api('/v1/completions?limit=1'),
       api('/v1/storage'), api('/v1/auth'),
+      // 개인 스코프를 본인 것만 실으려면 주체가 필요하다 — 측정자가 비어 있으면 부르지 않는다.
+      state.actor ? api('/v1/inferences?limit=200', asUser()) : Promise.resolve(null),
     ]);
     state.metrics = metrics;
     state.observations = observations.items;
@@ -332,6 +336,7 @@ async function refreshAll() {
     state.review = review.entries;
     state.screens = review.screens || {};        // 서명 → 그 화면에 실제로 보였던 필드
     state.thetaHigh = review.thetaHigh ?? 0.8;   // 신뢰도를 판정으로 바꾸는 기준선
+    state.inferences = inferences ? inferences.entries : null;   // null = 측정자 미지정
     state.decisions = decisions.entries;
     state.suggestions = suggestions.stats;
     state.concepts = ontology.concepts;
@@ -355,6 +360,7 @@ async function refreshAll() {
   renderMetrics();
   renderSignatures();
   renderReview();
+  renderInferences();
   renderDecisions();
   renderKnowledge();
   renderAuto();
@@ -471,6 +477,103 @@ function renderReview() {
   renderCorrection();
 }
 
+/* ── AI 추정 이력 ─────────────────────────────────────── */
+
+// 검수 큐가 "손봐야 하는 것"이라면 이쪽은 서 있는 판단 전부의 대장이다.
+// 승격·보정으로 큐에서 빠진 판단도 계속 쓰이므로 보이지 않으면 존재를 알 수 없다.
+function renderInferences() {
+  const box = $('inferences');
+
+  if (state.inferences === null) {
+    box.innerHTML = '<p class="empty">상단바에 측정자 ID를 넣으면 보인다 — 개인 스코프는 본인 것만 싣는다</p>';
+    return;
+  }
+  if (state.inferences.length === 0) {
+    box.innerHTML = '<p class="empty">아직 서 있는 추정이 없다</p>';
+    return;
+  }
+
+  const rows = state.inferences.map((e, i) => {
+    const screen = state.screens[e.signature];
+    const personal = e.scope.startsWith('personal:');
+    // LastInferredAt이 null이면 AI가 아니라 사람이 만든 매핑이다 — 그 구분이 이력의 요점이다.
+    const when = e.lastInferredAt
+      ? esc(e.lastInferredAt.slice(0, 16).replace('T', ' '))
+      : '<span class="badge">사람이 만듦</span>';
+
+    return `<tr>
+      <td class="hint">${when}</td>
+      <td>
+        ${screen ? `<strong>${esc(screen.title || screen.route)}</strong>
+                    <div class="hint mono">${esc(screen.route)}</div>`
+                 : `<span class="mono">${shortSig(e.signature)}</span>
+                    <div class="hint">관측이 남아 있지 않다</div>`}
+      </td>
+      <td>${esc(e.businessObject)}</td>
+      <td class="num">${e.mapping.length}</td>
+      <td class="num">${confidenceCell(e.confidence)}</td>
+      <td>${e.status === 'trusted'
+        ? '<span class="badge badge-mask">채택됨</span>'
+        : '<span class="badge">검수 대기</span>'}
+        ${personal ? '<span class="badge">개인</span>' : `<span class="badge">${esc(e.scope)}</span>`}</td>
+      <td>
+        <button class="btn btn-sm" data-edit="${i}">수정</button>
+        <button class="btn btn-sm btn-ghost" data-discard="${i}">제외</button>
+      </td>
+    </tr>`;
+  }).join('');
+
+  box.innerHTML = `<table>
+    <thead><tr>
+      <th>추론 시각</th><th>화면</th><th>업무객체</th><th class="num">필드</th>
+      <th class="num">신뢰도</th><th>상태</th><th></th>
+    </tr></thead>
+    <tbody>${rows}</tbody></table>`;
+
+  box.querySelectorAll('[data-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.editing = state.inferences[Number(btn.dataset.edit)];
+      renderReview();
+      $('correction').scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  });
+
+  box.querySelectorAll('[data-discard]').forEach((btn) => {
+    btn.addEventListener('click', () => discardInference(state.inferences[Number(btn.dataset.discard)], btn));
+  });
+}
+
+async function discardInference(entry, button) {
+  const msg = $('inferenceMsg');
+  const actor = requireActor(msg);
+  if (!actor) return;
+
+  const screen = state.screens[entry.signature];
+  const where = screen ? (screen.title || screen.route) : shortSig(entry.signature);
+  // 되돌리기가 아니라 다시 묻게 하는 것이고, 공용이면 남에게도 간다 — 누르기 전에 말해 준다.
+  const shared = !entry.scope.startsWith('personal:');
+  if (!confirm(`"${where}"의 추정을 제외한다.\n\n`
+    + `다음 관측에서 AI를 다시 부른다 (추론 비용이 다시 난다).`
+    + (shared ? `\n스코프가 ${entry.scope}라 모두에게 영향이 간다.` : ''))) return;
+
+  await whileBusy(button, '제외 중…', async () => {
+    try {
+      await api('/v1/inference/discard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-ChoPilot-User': actor },
+        body: JSON.stringify({ signature: entry.signature, scope: entry.scope }),
+      });
+      msg.className = 'hint';
+      msg.textContent = `제외됨 — "${where}"는 다음 관측에서 다시 추론된다.`;
+      if (state.editing === entry) state.editing = null;
+      await refreshAll();
+    } catch (err) {
+      msg.className = 'warn';
+      msg.textContent = `제외 실패: ${err.message}`;
+    }
+  });
+}
+
 function conceptOptions() {
   // 사용자는 화면에 보이는 말("단가")로 정정한다. 정규 이름과 별칭을 모두 후보로 준다.
   const names = state.concepts.flatMap((c) => [c.name, ...(c.aliases || [])]);
@@ -506,7 +609,8 @@ function renderCorrection() {
 
   box.innerHTML = `<div class="detail">
     <div class="detail-head">
-      <h3 style="margin:0">보정 — <code>${shortSig(entry.signature)}</code> ${esc(entry.businessObject)}</h3>
+      <h3 style="margin:0">보정 — ${screen ? esc(screen.title || screen.route) : `<code>${shortSig(entry.signature)}</code>`}
+        <span class="hint">${esc(entry.businessObject)}</span></h3>
       <div>
         <button id="applyCorrection" class="btn btn-primary btn-sm">보정 저장 (개인)</button>
         <button id="promoteEntry" class="btn btn-sm">그대로 승격 (공용)</button>
