@@ -216,39 +216,6 @@ public class InferenceHistoryTests
             e => e.GetProperty("scope").GetString()!.StartsWith("personal:", StringComparison.Ordinal));
     }
 
-    // 제외는 되돌리기가 아니라 "다시 물어라"다 — 엔트리와 함께 재추론 백오프의 기준도 사라진다.
-    [Fact]
-    public async Task Discard_MakesTheNextObservationInferAgain()
-    {
-        using var server = new WebApplicationFactory<Program>();
-        var client = server.CreateClient();
-
-        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
-        await client.PostAsJsonAsync("/v1/observations", Event("e2"));
-
-        var before = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
-        Assert.Equal(new[] { "ai", "deferred_cache" }, before.GetProperty("items").EnumerateArray()
-            .Select(o => o.GetProperty("source").GetString()));
-
-        var signature = before.GetProperty("items").EnumerateArray()
-            .First().GetProperty("signature").GetString()!;
-
-        var discard = await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "hong",
-            new PromoteRequest(signature, "global")));
-        Assert.Equal(HttpStatusCode.OK, discard.StatusCode);
-
-        await client.PostAsJsonAsync("/v1/observations", Event("e3"));
-        var after = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
-        Assert.Equal("ai", after.GetProperty("items").EnumerateArray()
-            .Last().GetProperty("source").GetString());
-
-        // 공용 판단을 지우는 것은 모두에게 가므로 누가 했는지가 증거로 남아야 한다.
-        var decisions = await client.GetFromJsonAsync<JsonElement>("/v1/decisions");
-        Assert.Contains(decisions.GetProperty("entries").EnumerateArray(),
-            d => d.GetProperty("action").GetString() == "inference_discard"
-                 && d.GetProperty("actor").GetString() == "hong");
-    }
-
     // 침묵하는 절단은 "이게 전부"로 읽힌다 — 대장에서 그 오해는
     // "AI가 결정해 둔 것은 이것뿐"이라는 잘못된 확신이 된다.
     [Fact]
@@ -267,63 +234,8 @@ public class InferenceHistoryTests
         Assert.Equal(3, page.GetProperty("total").GetInt32());
     }
 
-    // 제외하면 캐시에서 사라져 entries에 없다. 그것까지 빼면 "아직 추론된 적 없음"과
-    // "방금 내가 제외함"이 화면에서 똑같이 보인다 — 이력이라는 이름이 무색해진다.
     [Fact]
-    public async Task Discard_StaysInTheLedgerAfterTheEntryIsGone()
-    {
-        using var server = new WebApplicationFactory<Program>();
-        var client = server.CreateClient();
-        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
-
-        var before = await Inferences(client, "hong");
-        var signature = before.GetProperty("entries").EnumerateArray()
-            .First().GetProperty("signature").GetString()!;
-        Assert.Empty(before.GetProperty("discarded").EnumerateArray());
-
-        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "hong",
-            new PromoteRequest(signature, "global")));
-
-        var after = await Inferences(client, "hong");
-        Assert.Empty(after.GetProperty("entries").EnumerateArray());          // 캐시에서는 사라졌고
-        var gone = Assert.Single(after.GetProperty("discarded").EnumerateArray());
-        Assert.Equal(signature, gone.GetProperty("signature").GetString());   // 이력에는 남는다
-        Assert.Equal("hong", gone.GetProperty("actor").GetString());
-    }
-
-    // Snapshot(n)으로 받아 거르면 최근 n건 안에 제외가 없을 때 조용히 빈 목록이 된다.
-    [Fact]
-    public async Task DiscardHistory_SurvivesABurstOfOtherDecisions()
-    {
-        using var server = new WebApplicationFactory<Program>();
-        var client = server.CreateClient();
-
-        await client.PostAsJsonAsync("/v1/observations", Event("e0", "https://proc/s0/create"));
-        var first = await Inferences(client, "hong");
-        var signature = first.GetProperty("entries").EnumerateArray()
-            .First().GetProperty("signature").GetString()!;
-        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "hong",
-            new PromoteRequest(signature, "global")));
-
-        // 제외 뒤에 다른 결정이 잔뜩 쌓인다
-        for (var i = 1; i <= 12; i++)
-        {
-            await client.PostAsJsonAsync("/v1/observations", Event($"e{i}", $"https://proc/s{i}/create"));
-            var ledger = await Inferences(client, "hong");
-            var sig = ledger.GetProperty("entries").EnumerateArray()
-                .First(e => e.GetProperty("status").GetString() == "pending_review")
-                .GetProperty("signature").GetString()!;
-            await client.SendAsync(As(HttpMethod.Post, "/v1/review/promote", "hong",
-                new PromoteRequest(sig, "global", 1.0)));
-        }
-
-        var final = await Inferences(client, "hong");
-        Assert.Contains(final.GetProperty("discarded").EnumerateArray(),
-            d => d.GetProperty("signature").GetString() == signature);
-    }
-
-    [Fact]
-    public async Task Discard_RefusesAnotherPersonsPersonalScope()
+    public async Task Exclude_RefusesAnotherPersonsPersonalScope()
     {
         using var server = new WebApplicationFactory<Program>();
         var client = server.CreateClient();
@@ -337,14 +249,156 @@ public class InferenceHistoryTests
             new CorrectionRequest(signature, "PurchaseRequest",
                 new List<CorrectionField> { new("n2", "거래처") })));
 
-        var response = await client.SendAsync(As(HttpMethod.Post, "/v1/inference/discard", "kim",
-            new PromoteRequest(signature, "personal:hong")));
+        var response = await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "kim",
+            new ExclusionRequest(signature, "personal:hong", true)));
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);   // 존재 여부도 알려주지 않는다
 
-        // 그리고 실제로 지워지지 않았다
+        // 그리고 실제로 꺼지지 않았다
         var mine = await Inferences(client, "hong");
         Assert.Contains(mine.GetProperty("entries").EnumerateArray(),
-            e => e.GetProperty("scope").GetString() == "personal:hong");
+            e => e.GetProperty("scope").GetString() == "personal:hong"
+                 && !e.GetProperty("excluded").GetBoolean());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 제외 ⇄ 포함 토글. 되돌릴 수 있어야 토글이다 —
+// 지워 버리면 되돌릴 원본이 없고, 재추론이 그 자리를 덮으면 한 방향이 된다.
+// ─────────────────────────────────────────────────────────────────────────────
+public class ExclusionToggleTests
+{
+    private static ObservationEvent Event(string id) => new(
+        EventId: id, SessionId: "s", UserId: "hong",
+        CapturedAt: DateTimeOffset.UtcNow,
+        Screen: new ScreenInfo("https://proc/pr/create", "구매요청 등록", null),
+        Tree: new UiNode("n1", "Window", "구매요청 등록", null, "prCreate", new()
+        {
+            new("n2", "Edit", "거래처", "㈜대한", "txtVendor", new()),
+        }),
+        Privacy: new PrivacyInfo("1.0", new()));
+
+    private static HttpRequestMessage As(HttpMethod method, string url, string user, object? body = null)
+    {
+        var req = new HttpRequestMessage(method, url);
+        req.Headers.Add(RequestUser.Header, user);
+        if (body is not null) req.Content = JsonContent.Create(body);
+        return req;
+    }
+
+    private static async Task<JsonElement> Ledger(HttpClient client) =>
+        JsonDocument.Parse(await (await client.SendAsync(
+            As(HttpMethod.Get, "/v1/inferences", "hong"))).Content.ReadAsStringAsync()).RootElement;
+
+    private static JsonElement Only(JsonElement ledger) =>
+        ledger.GetProperty("entries").EnumerateArray().Single();
+
+    [Fact]
+    public async Task ExcludeThenInclude_RestoresTheSameJudgment()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var before = Only(await Ledger(client));
+        var signature = before.GetProperty("signature").GetString()!;
+        var fields = before.GetProperty("mapping").GetArrayLength();
+        Assert.False(before.GetProperty("excluded").GetBoolean());
+
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "hong",
+            new ExclusionRequest(signature, "global", true)));
+
+        // 지워지지 않는다 — 목록에 그대로 있고 꺼져 있을 뿐이다.
+        var off = Only(await Ledger(client));
+        Assert.True(off.GetProperty("excluded").GetBoolean());
+        Assert.Equal(fields, off.GetProperty("mapping").GetArrayLength());
+
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "hong",
+            new ExclusionRequest(signature, "global", false)));
+
+        var on = Only(await Ledger(client));
+        Assert.False(on.GetProperty("excluded").GetBoolean());
+        Assert.Equal(fields, on.GetProperty("mapping").GetArrayLength());
+    }
+
+    // 여기서 AI를 부르면 새 판단이 같은 자리(global)를 덮어써 되돌릴 원본이 사라진다.
+    [Fact]
+    public async Task ExcludedScreen_IsNotReInferred()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var signature = Only(await Ledger(client)).GetProperty("signature").GetString()!;
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "hong",
+            new ExclusionRequest(signature, "global", true)));
+
+        await client.PostAsJsonAsync("/v1/observations", Event("e2"));
+
+        var list = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
+        Assert.Equal("excluded", list.GetProperty("items").EnumerateArray()
+            .Last().GetProperty("source").GetString());
+
+        // 판단은 그대로 남아 있다 — 덮이지 않았다.
+        Assert.True(Only(await Ledger(client)).GetProperty("excluded").GetBoolean());
+
+        // 제외는 적중도 호출도 아니다. 둘 중 하나로 세면 지표가 거짓말을 한다.
+        var metrics = await client.GetFromJsonAsync<JsonElement>("/v1/metrics");
+        Assert.Equal(1, metrics.GetProperty("aiCalls").GetInt32());
+        Assert.Equal(0, metrics.GetProperty("deferredReuses").GetInt32());
+
+        // 다시 포함하면 그 판단이 곧바로 살아난다 — 새로 추론하지 않는다.
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "hong",
+            new ExclusionRequest(signature, "global", false)));
+        await client.PostAsJsonAsync("/v1/observations", Event("e3"));
+
+        var after = await client.GetFromJsonAsync<JsonElement>("/v1/metrics");
+        Assert.Equal(1, after.GetProperty("aiCalls").GetInt32());
+    }
+
+    // 끈 것은 그 스코프의 판단이지 이 화면 전체가 아니다.
+    [Fact]
+    public async Task ExcludingOneScope_LeavesTheOthersInUse()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var signature = Only(await Ledger(client)).GetProperty("signature").GetString()!;
+
+        // 보정으로 개인 스코프에 신뢰도 1.0 매핑을 심는다
+        await client.SendAsync(As(HttpMethod.Post, "/v1/correction", "hong",
+            new CorrectionRequest(signature, "PurchaseRequest",
+                new List<CorrectionField> { new("n2", "거래처") })));
+
+        // 전역만 끈다
+        await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "hong",
+            new ExclusionRequest(signature, "global", true)));
+
+        await client.PostAsJsonAsync("/v1/observations", Event("e2"));
+
+        var list = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
+        Assert.Equal("trusted_cache", list.GetProperty("items").EnumerateArray()
+            .Last().GetProperty("source").GetString());
+    }
+
+    [Fact]
+    public async Task Toggling_IsRecordedInTheDecisionLog()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1"));
+
+        var signature = Only(await Ledger(client)).GetProperty("signature").GetString()!;
+        foreach (var excluded in new[] { true, false })
+            await client.SendAsync(As(HttpMethod.Post, "/v1/inference/exclude", "hong",
+                new ExclusionRequest(signature, "global", excluded)));
+
+        var decisions = await client.GetFromJsonAsync<JsonElement>("/v1/decisions");
+        var actions = decisions.GetProperty("entries").EnumerateArray()
+            .Select(d => d.GetProperty("action").GetString()).ToList();
+
+        Assert.Contains("inference_exclude", actions);
+        Assert.Contains("inference_include", actions);
     }
 }

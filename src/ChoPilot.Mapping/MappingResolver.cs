@@ -20,6 +20,12 @@ public sealed class MappingResolver
 
         /// <summary>AI를 실제로 호출했다.</summary>
         public const string Ai = "ai";
+
+        /// <summary>
+        /// 사용자가 이 화면의 전역 판단을 껐다. 적중도 아니고 호출도 아니다 —
+        /// 캐시를 쓰지 않았지만 그 자리를 새 추론으로 덮지도 않았다.
+        /// </summary>
+        public const string Excluded = "excluded";
     }
 
     /// <summary>저신뢰 매핑을 다시 물어보기까지의 기본 대기 시간.</summary>
@@ -63,11 +69,20 @@ public sealed class MappingResolver
         CompiledKnowledge knowledge, string businessHint, CancellationToken ct = default)
     {
         MappingEntry? lowConfidence = null;
+        MappingEntry? excludedGlobal = null;
 
         foreach (var scope in new[] { $"personal:{userId}", $"org:{_orgId}", "global" })
         {
             var cached = _cache.Get(signature, scope);
             if (cached is null) continue;
+
+            // 사용자가 끈 판단은 없는 것처럼 지나간다. 좁은 스코프가 꺼져 있어도
+            // 넓은 스코프는 그대로 쓴다 — 끈 것은 그 스코프의 판단이지 이 화면 전체가 아니다.
+            if (cached.Excluded)
+            {
+                if (scope == "global") excludedGlobal = cached;
+                continue;
+            }
 
             if (cached.Confidence >= _thetaHigh)
                 return new ResolveResult(cached, Source.TrustedCache);
@@ -94,6 +109,14 @@ public sealed class MappingResolver
         {
             return new ResolveResult(lowConfidence, Source.DeferredCache);
         }
+
+        // 전역 판단이 꺼져 있으면 AI를 부르지 않는다. 새 추론은 같은 자리(global)에 쓰이므로
+        // 여기서 부르면 꺼 둔 원본을 덮어써 버리고, 되돌릴 것이 없어져 토글이 한 방향이 된다.
+        // 다른 스코프에 쓸 수 있는 저신뢰 판단이 있으면 그건 그대로 쓴다 — 끈 것은 전역 쪽이다.
+        if (excludedGlobal is not null)
+            return lowConfidence is not null
+                ? new ResolveResult(lowConfidence, Source.DeferredCache)
+                : new ResolveResult(excludedGlobal, Source.Excluded);
 
         // 캐시 미스 / 백오프 만료 / 지식 버전 변경 → 같은 구조·지식 버전은 한 번만 AI 호출.
         var flightKey = $"{signature}\u001f{knowledge.Version}";

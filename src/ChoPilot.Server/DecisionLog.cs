@@ -61,16 +61,5 @@ public sealed class DecisionLog
     public IReadOnlyList<DecisionEntry> Snapshot(int limit = 100) =>
         _log.Reverse().Take(limit).ToList();
 
-    /// <summary>
-    /// 한 종류의 결정만. 최신순.
-    ///
-    /// <para>
-    /// <c>Snapshot(n)</c>으로 받아 거르면 최근 n건 <b>안에</b> 그 종류가 없을 때 조용히 빈 목록이
-    /// 된다 — 승격이 백 번 일어난 뒤에는 제외 이력이 있어도 안 보인다. 거르고 나서 자른다.
-    /// </para>
-    /// </summary>
-    public IReadOnlyList<DecisionEntry> ByAction(string action, int limit = 100) =>
-        _log.Reverse().Where(e => e.Action == action).Take(limit).ToList();
-
     public int Count => _log.Count;
 }

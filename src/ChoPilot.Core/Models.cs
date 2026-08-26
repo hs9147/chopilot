@@ -86,7 +86,18 @@ public sealed record MappingEntry(
     int Revision = 1,
 
     /// <summary>추가 전용 저널에서 personal 매핑 삭제를 복원하기 위한 tombstone.</summary>
-    bool Deleted = false);
+    bool Deleted = false,
+
+    /// <summary>
+    /// 사용자가 이 판단을 <b>쓰지 말라고 껐다</b>. 되돌릴 수 있는 스위치다 — 삭제가 아니다.
+    ///
+    /// <para>
+    /// 켜져 있으면 캐스케이드가 이 엔트리를 건너뛴다. 그리고 전역 엔트리가 제외돼 있으면
+    /// <b>AI를 다시 부르지도 않는다</b>: 새 추론 결과가 같은 자리를 덮어써 버리면
+    /// 되돌릴 원본이 사라져 토글이 한 방향이 된다. 제외는 "쓰지 마라"이지 "다시 뽑아라"가 아니다.
+    /// </para>
+    /// </summary>
+    bool Excluded = false);
 
 public sealed record FieldMapping(
     string ElementRef,

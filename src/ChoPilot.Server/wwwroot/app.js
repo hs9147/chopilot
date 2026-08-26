@@ -32,8 +32,7 @@ const state = {
   concepts: [],
   inferences: null,       // AI 추정 이력(trusted 포함). null이면 측정자 미지정이라 안 불렀다
   inferenceTotal: 0,      // 서버가 자르기 전 개수 — 잘린 사실을 화면이 말해야 한다
-  discarded: [],          // 제외된 판단(결정 이력에서). 캐시에 없으므로 inferences에는 안 들어온다
-  inferenceFilter: 'all', // all | pending | trusted | discarded
+  inferenceFilter: 'all', // all | pending | trusted | excluded
   screens: {},            // 서명 → 화면 필드(ref·라벨·값). AI 판단을 원본과 대조하는 데 쓴다
   thetaHigh: 0.8,         // 서버의 Mapping:ThetaHigh — 신뢰도 판정 기준선
   editing: null,          // 보정 중인 검수 큐 항목
@@ -141,6 +140,7 @@ const SOURCE_LABEL = {
   trusted_cache: '캐시 적중',
   deferred_cache: '캐시 재사용(θ 미만)',
   ai: 'AI 추론',
+  excluded: '제외됨(판단 사용 안 함)',
 };
 
 // 매핑 1건이 어디서 왔는지. 사용자가 읽는 자리에 stub/cache 같은 내부 토큰을 그대로 두면
@@ -341,7 +341,6 @@ async function refreshAll() {
     state.thetaHigh = review.thetaHigh ?? 0.8;   // 신뢰도를 판정으로 바꾸는 기준선
     state.inferences = inferences ? inferences.entries : null;   // null = 측정자 미지정
     state.inferenceTotal = inferences ? inferences.total : 0;    // 자르기 전 개수
-    state.discarded = inferences ? inferences.discarded : [];    // 제외돼 캐시에 없는 판단
     state.decisions = decisions.entries;
     state.suggestions = suggestions.stats;
     state.concepts = ontology.concepts;
@@ -493,33 +492,22 @@ function renderInferences() {
     box.innerHTML = '<p class="empty">상단바에 측정자 ID를 넣으면 보인다 — 개인 스코프는 본인 것만 싣는다</p>';
     return;
   }
-  // 서 있는 추정이 없어도 제외 이력은 있을 수 있다 — 그때 "없다"고 하면 방금 한 제외가 지워진다.
-  if (state.inferences.length === 0 && (state.discarded || []).length === 0) {
+  if (state.inferences.length === 0) {
     box.innerHTML = '<p class="empty">아직 서 있는 추정이 없다</p>';
     return;
   }
 
-  // 서 있는 판단과 제외된 판단을 한 줄기로 세운다. 제외된 것을 빼면 "아직 추론된 적 없음"과
-  // "방금 내가 제외함"이 화면에서 똑같이 보인다 — 이력이라는 이름이 무색해진다.
   // 인덱스는 state.inferences 기준을 그대로 들고 다닌다. 필터된 배열로 다시 매기면
-  // "제외"가 화면에 보이는 행이 아니라 다른 추정을 지운다.
-  const live = state.inferences.map((e, i) => ({
-    kind: 'live', e, i,
-    // 사람이 만든 매핑(보정·승격)은 lastInferredAt이 null이다. 맨 뒤로 보내면
-    // 방금 내가 고친 것이 목록 끝에 처박힌다 — 서버 정렬과 같은 규칙을 쓴다.
-    at: e.lastInferredAt || '9999',
-  }));
-  const gone = (state.discarded || []).map((d) => ({ kind: 'discarded', d, at: d.at }));
+  // 버튼이 화면에 보이는 행이 아니라 다른 추정을 건드린다.
+  const all = state.inferences.map((e, i) => ({ e, i }));
 
   const FILTERS = [
     ['all', '전체', () => true],
-    ['pending', '검수 대기', (r) => r.kind === 'live' && r.e.status !== 'trusted'],
-    ['trusted', '채택됨', (r) => r.kind === 'live' && r.e.status === 'trusted'],
-    ['discarded', '제외됨', (r) => r.kind === 'discarded'],
+    ['pending', '검수 대기', ({ e }) => !e.excluded && e.status !== 'trusted'],
+    ['trusted', '채택됨', ({ e }) => !e.excluded && e.status === 'trusted'],
+    ['excluded', '제외됨', ({ e }) => e.excluded],
   ];
   const active = FILTERS.find((f) => f[0] === state.inferenceFilter) || FILTERS[0];
-
-  const all = [...live, ...gone].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const shown = all.filter(active[2]);
 
   const chips = FILTERS.map(([key, label, pred]) =>
@@ -544,37 +532,29 @@ function renderInferences() {
     ? '<span class="badge">개인</span>'
     : `<span class="badge">${esc(scope)}</span>`;
 
-  const rows = shown.map((row) => {
-    if (row.kind === 'discarded') {
-      const d = row.d;
-      return `<tr class="row-gone">
-        <td class="hint">${esc(d.at.slice(0, 16).replace('T', ' '))}</td>
-        <td>${screenCell(d.signature)}</td>
-        <td colspan="3" class="hint">${esc(d.detail)}</td>
-        <td><span class="badge badge-leak">제외됨</span> ${scopeBadge(d.scope)}
-          <div class="hint">${esc(d.actor)}</div></td>
-        <td class="hint">다음 관측에서 재추론</td>
-      </tr>`;
-    }
-
-    const e = row.e;
+  const rows = shown.map(({ e, i }) => {
     // lastInferredAt이 null이면 AI가 아니라 사람이 만든 매핑이다 — 그 구분이 이력의 요점이다.
     const when = e.lastInferredAt
       ? esc(e.lastInferredAt.slice(0, 16).replace('T', ' '))
       : '<span class="badge">사람이 만듦</span>';
 
-    return `<tr>
+    const status = e.excluded
+      ? '<span class="badge badge-leak">제외됨</span>'
+      : (e.status === 'trusted'
+        ? '<span class="badge badge-mask">채택됨</span>'
+        : '<span class="badge">검수 대기</span>');
+
+    return `<tr class="${e.excluded ? 'row-gone' : ''}">
       <td class="hint">${when}</td>
       <td>${screenCell(e.signature)}</td>
       <td>${esc(e.businessObject)}</td>
       <td class="num">${e.mapping.length}</td>
       <td class="num">${confidenceCell(e.confidence)}</td>
-      <td>${e.status === 'trusted'
-        ? '<span class="badge badge-mask">채택됨</span>'
-        : '<span class="badge">검수 대기</span>'} ${scopeBadge(e.scope)}</td>
+      <td>${status} ${scopeBadge(e.scope)}</td>
       <td>
-        <button class="btn btn-sm" data-edit="${row.i}">수정</button>
-        <button class="btn btn-sm btn-ghost" data-discard="${row.i}">제외</button>
+        <button class="btn btn-sm" data-edit="${i}" ${e.excluded ? 'disabled' : ''}>수정</button>
+        <button class="btn btn-sm ${e.excluded ? '' : 'btn-ghost'}" data-toggle="${i}">
+          ${e.excluded ? '포함' : '제외'}</button>
       </td>
     </tr>`;
   }).join('');
@@ -599,38 +579,45 @@ function renderInferences() {
     });
   });
 
-  box.querySelectorAll('[data-discard]').forEach((btn) => {
-    btn.addEventListener('click', () => discardInference(state.inferences[Number(btn.dataset.discard)], btn));
+  box.querySelectorAll('[data-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => toggleInference(state.inferences[Number(btn.dataset.toggle)], btn));
   });
 }
 
-async function discardInference(entry, button) {
+async function toggleInference(entry, button) {
   const msg = $('inferenceMsg');
   const actor = requireActor(msg);
   if (!actor) return;
 
   const screen = state.screens[entry.signature];
   const where = screen ? (screen.title || screen.route) : shortSig(entry.signature);
-  // 되돌리기가 아니라 다시 묻게 하는 것이고, 공용이면 남에게도 간다 — 누르기 전에 말해 준다.
-  const shared = !entry.scope.startsWith('personal:');
-  if (!confirm(`"${where}"의 추정을 제외한다.\n\n`
-    + `다음 관측에서 AI를 다시 부른다 (추론 비용이 다시 난다).`
-    + (shared ? `\n스코프가 ${entry.scope}라 모두에게 영향이 간다.` : ''))) return;
+  const excluding = !entry.excluded;
 
-  await whileBusy(button, '제외 중…', async () => {
+  // 되돌릴 수 있는 스위치라 제외에는 확인을 묻지 않는다 — 되돌릴 수 없는 것에만 물어야
+  // 확인 대화상자가 신호로 남는다. 다만 공용 스코프는 남에게도 가므로 그때는 묻는다.
+  const shared = !entry.scope.startsWith('personal:');
+  if (shared && !confirm(`"${where}"의 추정을 ${excluding ? '제외' : '포함'}한다.\n\n`
+    + `스코프가 ${entry.scope}라 모두에게 영향이 간다.\n`
+    + (excluding
+      ? '판단은 지워지지 않는다 — 언제든 "포함"으로 되돌릴 수 있다.'
+      : '이 판단을 다시 쓰기 시작한다.'))) return;
+
+  await whileBusy(button, excluding ? '제외 중…' : '포함 중…', async () => {
     try {
-      await api('/v1/inference/discard', {
+      await api('/v1/inference/exclude', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-ChoPilot-User': actor },
-        body: JSON.stringify({ signature: entry.signature, scope: entry.scope }),
+        body: JSON.stringify({ signature: entry.signature, scope: entry.scope, excluded: excluding }),
       });
       msg.className = 'hint';
-      msg.textContent = `제외됨 — "${where}"는 다음 관측에서 다시 추론된다.`;
-      if (state.editing === entry) state.editing = null;
+      msg.textContent = excluding
+        ? `제외됨 — "${where}"의 판단을 쓰지 않는다. 지워지지 않았으니 "포함"으로 되돌릴 수 있다.`
+        : `포함됨 — "${where}"의 판단을 다시 쓴다.`;
+      if (excluding && state.editing === entry) state.editing = null;
       await refreshAll();
     } catch (err) {
       msg.className = 'warn';
-      msg.textContent = `제외 실패: ${err.message}`;
+      msg.textContent = `${excluding ? '제외' : '포함'} 실패: ${err.message}`;
     }
   });
 }

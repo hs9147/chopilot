@@ -100,9 +100,11 @@
 
     <h3>AI 추정 이력 <span class="hint">— 지금 서 있는 판단 전부. 승격·보정으로 검수 큐에서 빠진 것도 계속 쓰인다</span></h3>
     <p class="hint">
-      <strong>수정</strong>은 위 보정 폼을 연다. <strong>제외</strong>는 그 추정을 캐시에서 지운다 —
-      되돌리는 게 아니라 <strong>다시 묻게 하는 것</strong>이라 다음 관측에서 AI를 새로 부른다(비용이 다시 난다).
-      공용 스코프를 지우면 모두에게 영향이 가고, 누가 지웠는지 아래 결정 이력에 남는다.
+      <strong>수정</strong>은 위 보정 폼을 연다. <strong>제외 ⇄ 포함</strong>은 그 판단을 쓸지 말지를
+      뒤집는 스위치다 — <strong>지우지 않으므로 언제든 되돌린다</strong>. 제외된 판단은 캐스케이드가
+      건너뛰고, 전역 판단이 제외돼 있으면 <strong>AI를 새로 부르지도 않는다</strong>(새 추론이 그 자리를
+      덮어쓰면 되돌릴 원본이 사라진다). 공용 스코프를 뒤집으면 모두에게 영향이 가고, 누가 했는지
+      아래 결정 이력에 남는다.
     </p>
     <div id="inferences" class="table-scroll"></div>
     <p id="inferenceMsg" class="hint"></p>

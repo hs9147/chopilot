@@ -18,6 +18,9 @@ public sealed record CorrectionRequest(
 /// <summary>저신뢰 매핑 승격 요청 (ARCHITECTURE §5.2 step 6 HITL).</summary>
 public sealed record PromoteRequest(string Signature, string Scope, double? Confidence = null);
 
+/// <summary>추정 제외/포함 토글 요청. <paramref name="Excluded"/>가 목표 상태다(현재 상태의 반대가 아니라).</summary>
+public sealed record ExclusionRequest(string Signature, string Scope, bool Excluded);
+
 /// <summary>
 /// AI 추정 이력 한 페이지. <paramref name="Total"/>은 <b>자르기 전</b> 개수다 —
 /// 몇 건이 잘렸는지 말해 주지 않으면 화면이 "이게 전부"라고 잘못 말한다.
@@ -93,19 +96,19 @@ public sealed class PersonalizationService
     }
 
     /// <summary>
-    /// 추정 제외 — 캐시에서 지운다. 지운 엔트리를 돌려주고, 없거나 권한이 없으면 null.
+    /// 추정 제외/포함 토글. 바뀐 엔트리를 돌려주고, 없거나 권한이 없으면 null.
     ///
     /// <para>
-    /// 되돌리는 것이 아니라 <b>다시 묻게 하는</b> 것이다. 엔트리가 사라지면 재추론 백오프의 기준도
-    /// 함께 사라지므로 다음 관측에서 곧바로 AI를 다시 부른다 — <b>추론 비용이 다시 난다</b>.
-    /// 판단이 틀렸을 때 쓰는 것이지, 마음에 안 들 때 누르는 버튼이 아니다.
+    /// <b>지우지 않는다.</b> 엔트리는 그대로 두고 <see cref="MappingEntry.Excluded"/>만 뒤집는다 —
+    /// 지워 버리면 되돌릴 원본이 없어 토글이 한 방향이 되고, 다음 관측이 AI를 다시 불러
+    /// 추론 비용까지 난다. 제외는 "이 판단을 쓰지 마라"이지 "다시 뽑아라"가 아니다.
     /// </para>
     /// <para>
-    /// 남의 개인 스코프는 지울 수 없다. 공용 평면은 누구든 지울 수 있고 결정 이력에 남는다 —
-    /// 공용 판단을 지우는 것은 모두에게 영향이 가므로 누가 했는지가 증거로 남아야 한다.
+    /// 남의 개인 스코프는 건드릴 수 없다. 공용 평면은 누구든 뒤집을 수 있고 결정 이력에 남는다 —
+    /// 공용 판단을 끄고 켜는 것은 모두에게 영향이 가므로 누가 했는지가 증거로 남아야 한다.
     /// </para>
     /// </summary>
-    public MappingEntry? Discard(string signature, string scope, string userId)
+    public MappingEntry? SetExcluded(string signature, string scope, bool excluded, string userId)
     {
         if (scope.StartsWith("personal:", StringComparison.Ordinal) && scope != PersonalScope(userId))
             return null;
@@ -113,8 +116,9 @@ public sealed class PersonalizationService
         var entry = _cache.Get(signature, scope);
         if (entry is null) return null;
 
-        _cache.Remove(signature, scope);
-        return entry;
+        var toggled = entry with { Excluded = excluded };
+        _cache.Put(toggled);
+        return toggled;
     }
 
     private static string PersonalScope(string userId) => $"personal:{userId}";

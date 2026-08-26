@@ -771,7 +771,7 @@ app.MapGet("/v1/review", (PersonalizationService svc, ObservationStore store, IC
 // 승격·보정으로 큐에서 빠진 판단도 계속 쓰이므로, 그것까지 보여야 서 있는 판단 전부가 보인다.
 app.MapGet("/v1/inferences",
     (HttpRequest request, PersonalizationService svc, ObservationStore store,
-     DecisionLog decisions, IConfiguration config, int? limit) =>
+     IConfiguration config, int? limit) =>
 {
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
@@ -781,34 +781,31 @@ app.MapGet("/v1/inferences",
     {
         entries = ledger.Entries,
         total = ledger.Total,          // 자르기 전 개수 — 몇 건이 잘렸는지 화면이 말할 수 있어야 한다
-
-        // 제외된 판단은 캐시에서 사라지므로 entries에 없다. 그것까지 빼면 "아직 추론된 적 없음"과
-        // "방금 내가 제외함"이 화면에서 똑같이 보인다 — 이력이라는 이름이 무색해진다.
-        discarded = decisions.ByAction("inference_discard", limit ?? 200),
-
         screens = MeasurementViews.ScreensBySignature(store.List()),
         thetaHigh = config.GetValue("Mapping:ThetaHigh", 0.8),
     });
 });
 
-// 추정 제외 — 되돌리는 게 아니라 다시 묻게 하는 것이다. 엔트리가 사라지면 재추론 백오프의
-// 기준도 사라져 다음 관측에서 곧바로 AI를 다시 부른다. 공용 평면을 지우면 모두에게 영향이
-// 가므로 누가 지웠는지 결정 이력에 남긴다.
-app.MapPost("/v1/inference/discard",
-    (HttpRequest request, PromoteRequest req, PersonalizationService svc, DecisionLog decisions) =>
+// 추정 제외/포함 토글. 지우지 않고 Excluded만 뒤집는다 — 지우면 되돌릴 원본이 없어
+// 토글이 한 방향이 되고, 다음 관측이 AI를 다시 불러 추론 비용까지 난다.
+// 공용 평면을 끄고 켜는 것은 모두에게 영향이 가므로 누가 했는지 결정 이력에 남긴다.
+app.MapPost("/v1/inference/exclude",
+    (HttpRequest request, ExclusionRequest req, PersonalizationService svc, DecisionLog decisions) =>
 {
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
 
-    var discarded = svc.Discard(req.Signature, req.Scope, actor);
-    if (discarded is null)
-        return Results.NotFound(new { error = "그 스코프에 지울 추정이 없다" });   // 남의 개인 매핑도 여기로 떨어진다
+    var entry = svc.SetExcluded(req.Signature, req.Scope, req.Excluded, actor);
+    if (entry is null)
+        return Results.NotFound(new { error = "그 스코프에 해당 추정이 없다" });   // 남의 개인 매핑도 여기로 떨어진다
 
-    decisions.Record("inference_discard", actor, discarded.Signature, discarded.Scope,
-        discarded.Confidence,
-        $"{discarded.BusinessObject} 필드 {discarded.Mapping.Count}개 제외 — 다음 관측에서 재추론된다");
+    decisions.Record(req.Excluded ? "inference_exclude" : "inference_include",
+        actor, entry.Signature, entry.Scope, entry.Confidence,
+        req.Excluded
+            ? $"{entry.BusinessObject} 필드 {entry.Mapping.Count}개 제외 — 이 판단을 쓰지 않는다"
+            : $"{entry.BusinessObject} 필드 {entry.Mapping.Count}개 포함 — 다시 쓴다");
 
-    return Results.Ok(new { discarded = true, discarded.Signature, discarded.Scope });
+    return Results.Ok(new { entry.Signature, entry.Scope, entry.Excluded });
 });
 
 // 검수 통과분을 trusted로 승격(HITL). 누가 승인했는지 결정 이력에 남긴다.
