@@ -1,0 +1,132 @@
+using System.Net.Http.Json;
+using System.Text.Json;
+using ChoPilot.Core;
+using ChoPilot.Server;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using Xunit;
+
+namespace ChoPilot.Tests;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI 판단을 사람이 읽을 수 있게 내려보내는 부분.
+//
+// 매핑은 ref와 정규 개념만 들고 있다(n2 → Vendor). 그것만으로는 판단이 맞는지 볼 수 없다 —
+// n2가 화면의 어느 칸이었는지는 화면 쪽에만 있고, 0.60이 통과인지는 θ를 알아야 말할 수 있다.
+// ─────────────────────────────────────────────────────────────────────────────
+public class JudgmentViewTests
+{
+    private static ObservationEvent Event(string id, string? vendor, string url = "https://proc/pr/create") => new(
+        EventId: id, SessionId: "s", UserId: "hong",
+        CapturedAt: DateTimeOffset.UtcNow,
+        Screen: new ScreenInfo(url, "구매요청 등록", null),
+        Tree: new UiNode("n1", "Window", "구매요청 등록", null, "prCreate", new()
+        {
+            new("n2", "Edit", "거래처", vendor, "txtVendor", new()),
+            new("n3", "Edit", "품목코드", "M-001", "txtMat", new()),
+            new("n9", "Group", null, null, "wrapper", new()),   // 라벨도 값도 없는 컨테이너
+        }),
+        Privacy: new PrivacyInfo("1.0", new()));
+
+    private static JsonElement Screen(JsonElement review) =>
+        review.GetProperty("screens").EnumerateObject().First().Value;
+
+    [Fact]
+    public async Task Review_CarriesTheScreenLabelsThatTheMappingLacks()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1", "㈜대한"));
+
+        var review = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        var entry = review.GetProperty("entries").EnumerateArray().First();
+        var screen = Screen(review);
+
+        // 검수 큐가 든 것은 ref뿐이다
+        var refs = entry.GetProperty("mapping").EnumerateArray()
+            .Select(m => m.GetProperty("elementRef").GetString()).ToList();
+        Assert.Contains("n2", refs);
+
+        // 그 ref가 화면에서 무엇이었는지는 screens가 채운다
+        Assert.Equal("/pr/create", screen.GetProperty("route").GetString());
+        Assert.Equal("구매요청 등록", screen.GetProperty("title").GetString());
+
+        var vendor = screen.GetProperty("fields").EnumerateArray()
+            .Single(f => f.GetProperty("ref").GetString() == "n2");
+        Assert.Equal("거래처", vendor.GetProperty("label").GetString());
+        Assert.Equal("㈜대한", vendor.GetProperty("value").GetString());
+    }
+
+    // 라벨도 값도 없는 노드를 실으면 대조표가 껍데기 행으로 길어지고, 사람이 훑을 것이 늘어난다.
+    [Fact]
+    public async Task Screens_LeaveOutNodesWithNeitherLabelNorValue()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1", "㈜대한"));
+
+        var review = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        var refs = Screen(review).GetProperty("fields").EnumerateArray()
+            .Select(f => f.GetProperty("ref").GetString()).ToList();
+
+        Assert.Contains("n1", refs);      // 창은 이름이 있다
+        Assert.Contains("n2", refs);
+        Assert.DoesNotContain("n9", refs);
+    }
+
+    // 서명이 같다는 건 구조가 같다는 뜻이라 라벨은 같다. 값만 최근 것이어야 한다.
+    [Fact]
+    public async Task Screens_UseTheMostRecentObservationOfASignature()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1", "㈜대한"));
+        await client.PostAsJsonAsync("/v1/observations", Event("e2", "㈜한빛"));
+
+        var review = await client.GetFromJsonAsync<JsonElement>("/v1/review");
+        var vendor = Screen(review).GetProperty("fields").EnumerateArray()
+            .Single(f => f.GetProperty("ref").GetString() == "n2");
+
+        Assert.Equal("㈜한빛", vendor.GetProperty("value").GetString());
+    }
+
+    // 0.60이 통과인지 탈락인지는 임계치를 알아야만 말할 수 있다. 화면이 추측하면 안 된다.
+    [Fact]
+    public async Task Review_ReportsTheThresholdThatTurnsConfidenceIntoAVerdict()
+    {
+        using var server = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+            b.ConfigureAppConfiguration((_, c) => c.AddInMemoryCollection(
+                new Dictionary<string, string?> { ["Mapping:ThetaHigh"] = "0.55" })));
+
+        var review = await server.CreateClient().GetFromJsonAsync<JsonElement>("/v1/review");
+        Assert.Equal(0.55, review.GetProperty("thetaHigh").GetDouble(), 3);
+    }
+
+    // cacheHit은 두 갈래라 재추론 보류(θ 미만 캐시 재사용)를 AI 호출과 구분하지 못한다.
+    // 구분이 없으면 목록이 "매번 AI를 부른다"고 잘못 말한다 — 지표는 1회라고 말하는데.
+    [Fact]
+    public async Task ObservationList_KeepsTheThreeWaySourceNotJustCacheHit()
+    {
+        using var server = new WebApplicationFactory<Program>();
+        var client = server.CreateClient();
+        await client.PostAsJsonAsync("/v1/observations", Event("e1", "㈜대한"));
+        await client.PostAsJsonAsync("/v1/observations", Event("e2", "㈜대한"));
+
+        var list = await client.GetFromJsonAsync<JsonElement>("/v1/observations");
+        var sources = list.GetProperty("items").EnumerateArray()
+            .Select(o => o.GetProperty("source").GetString()).ToList();
+
+        Assert.Equal(new[] { "ai", "deferred_cache" }, sources);
+
+        // 목록의 AI 건수와 지표의 AI 호출 수가 어긋나면 둘 중 하나는 거짓말이다.
+        var metrics = await client.GetFromJsonAsync<JsonElement>("/v1/metrics");
+        Assert.Equal(sources.Count(s => s == "ai"), metrics.GetProperty("aiCalls").GetInt32());
+        Assert.Equal(sources.Count(s => s == "deferred_cache"),
+            metrics.GetProperty("deferredReuses").GetInt32());
+
+        // 시각도 함께 온다 — 축적이 사흘치인지 3분치인지는 시각 없이는 알 수 없다.
+        foreach (var o in list.GetProperty("items").EnumerateArray())
+            Assert.NotEqual(default, o.GetProperty("capturedAt").GetDateTimeOffset());
+    }
+}

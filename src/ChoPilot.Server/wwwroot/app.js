@@ -30,6 +30,8 @@ const state = {
   decisions: [],
   suggestions: null,
   concepts: [],
+  screens: {},            // 서명 → 화면 필드(ref·라벨·값). AI 판단을 원본과 대조하는 데 쓴다
+  thetaHigh: 0.8,         // 서버의 Mapping:ThetaHigh — 신뢰도 판정 기준선
   editing: null,          // 보정 중인 검수 큐 항목
   actor: localStorage.getItem(ACTOR_KEY) || '',
   knowledge: [],          // 지식 문서(초안 + 게시)
@@ -136,6 +138,35 @@ const SOURCE_LABEL = {
   deferred_cache: '캐시 재사용(θ 미만)',
   ai: 'AI 추론',
 };
+
+// 매핑 1건이 어디서 왔는지. 사용자가 읽는 자리에 stub/cache 같은 내부 토큰을 그대로 두면
+// 그것이 무엇인지 아는 사람만 판단 결과를 검수할 수 있다.
+const PROVENANCE_LABEL = {
+  ai: 'AI 추론',
+  stub: '스텁(모의 AI)',
+  cache: '캐시에서 재사용',
+  user: '사람이 보정',
+  seed: '시드',
+};
+
+const provenanceLabel = (p) => PROVENANCE_LABEL[p] || p || '—';
+
+// 온톨로지의 정규 개념명은 영문(Vendor)이고 화면은 한국어(거래처)다. 판단 결과를 화면 말로
+// 되돌려 주지 않으면 사용자는 "AI가 무엇이라고 했는지"를 온톨로지를 뒤져야 알 수 있다.
+function conceptLabel(name) {
+  if (!name) return '';
+  const c = state.concepts.find((x) => x.name === name);
+  const korean = (c?.aliases || []).find((a) => /[가-힣]/.test(a));
+  return korean || name;
+}
+
+// 신뢰도는 숫자 자체가 아니라 θ 대비 위치가 뜻을 갖는다 — 0.60은 θ가 0.5면 통과, 0.8이면 탈락이다.
+function confidenceCell(value) {
+  const theta = state.thetaHigh;
+  const pass = value >= theta;
+  return `<span class="${pass ? 'ok' : 'warn-text'}">${value.toFixed(2)}</span>`
+    + ` <span class="hint">${pass ? `θ ${theta} 이상 · 적중` : `θ ${theta} 미만 · 적중 안 됨`}</span>`;
+}
 
 // 덤프 파일은 {signature, observation:{...}} 로 감싸여 있고, 벗겨진 이벤트도 받아들인다.
 function extractObservation(json) {
@@ -299,6 +330,8 @@ async function refreshAll() {
     state.routes = signatures.routes;
     state.splitRoutes = signatures.splitRoutes;
     state.review = review.entries;
+    state.screens = review.screens || {};        // 서명 → 그 화면에 실제로 보였던 필드
+    state.thetaHigh = review.thetaHigh ?? 0.8;   // 신뢰도를 판정으로 바꾸는 기준선
     state.decisions = decisions.entries;
     state.suggestions = suggestions.stats;
     state.concepts = ontology.concepts;
@@ -402,19 +435,27 @@ function renderReview() {
     return;
   }
 
-  const rows = state.review.map((e) => `<tr class="clickable ${state.editing && state.editing.signature === e.signature && state.editing.scope === e.scope ? 'selected' : ''}"
+  const rows = state.review.map((e) => {
+    const screen = state.screens[e.signature];
+    return `<tr class="clickable ${state.editing && state.editing.signature === e.signature && state.editing.scope === e.scope ? 'selected' : ''}"
       data-sig="${esc(e.signature)}" data-scope="${esc(e.scope)}">
-    <td class="mono">${shortSig(e.signature)}</td>
+    <td>
+      ${screen ? `<strong>${esc(screen.title || screen.route)}</strong>
+                  <div class="hint mono">${esc(screen.route)} · ${shortSig(e.signature)}</div>`
+               : `<span class="mono">${shortSig(e.signature)}</span>
+                  <div class="hint">이 서명의 관측이 남아 있지 않다</div>`}
+    </td>
     <td>${esc(e.businessObject)}</td>
     <td class="mono">${esc(e.scope)}</td>
-    <td class="num">${e.confidence.toFixed(2)}</td>
+    <td class="num">${confidenceCell(e.confidence)}</td>
     <td class="num">${e.mapping.length}</td>
     <td class="hint">${e.lastInferredAt ? esc(e.lastInferredAt.slice(0, 19).replace('T', ' ')) : '사람이 만든 매핑'}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 
   box.innerHTML = `<table>
     <thead><tr>
-      <th>서명</th><th>업무객체</th><th>스코프</th>
+      <th>화면</th><th>업무객체</th><th>스코프</th>
       <th class="num">신뢰도</th><th class="num">필드</th><th>마지막 추론</th>
     </tr></thead>
     <tbody>${rows}</tbody></table>`;
@@ -441,12 +482,27 @@ function renderCorrection() {
   const entry = state.editing;
   if (!entry) { box.innerHTML = ''; return; }
 
-  const rows = entry.mapping.map((m, i) => `<tr>
-    <td class="mono">${esc(m.elementRef)}</td>
-    <td><input type="text" class="text" data-field="${i}" value="${esc(m.concept)}" list="conceptList"></td>
-    <td class="num">${m.confidence.toFixed(2)}</td>
-    <td>${esc(m.provenance)}</td>
-  </tr>`).join('');
+  const screen = state.screens[entry.signature];
+  const field = (ref) => (screen?.fields || []).find((f) => f.ref === ref);
+
+  const rows = entry.mapping.map((m, i) => {
+    const f = field(m.elementRef);
+    return `<tr>
+    <td>
+      ${f?.label ? `<strong>${esc(f.label)}</strong>` : '<span class="badge">라벨 없음</span>'}
+      <div class="hint mono">${esc(m.elementRef)}</div>
+    </td>
+    <td class="mono">${f?.masked
+      ? '<span class="badge badge-mask">마스킹</span>'
+      : (f?.value ? esc(f.value) : '<span class="badge">비어있음</span>')}</td>
+    <td>
+      <input type="text" class="text" data-field="${i}" value="${esc(m.concept)}" list="conceptList">
+      <div class="hint">AI 판단: ${esc(conceptLabel(m.concept))} <span class="mono">(${esc(m.concept)})</span></div>
+    </td>
+    <td class="num">${confidenceCell(m.confidence)}</td>
+    <td>${esc(provenanceLabel(m.provenance))}</td>
+  </tr>`;
+  }).join('');
 
   box.innerHTML = `<div class="detail">
     <div class="detail-head">
@@ -463,7 +519,10 @@ function renderCorrection() {
     </p>
     <datalist id="conceptList">${conceptOptions()}</datalist>
     <div class="table-scroll"><table>
-      <thead><tr><th>ref</th><th>개념</th><th class="num">신뢰도</th><th>출처</th></tr></thead>
+      <thead><tr>
+        <th>화면의 칸</th><th>화면의 값</th><th>AI가 붙인 개념</th>
+        <th class="num">신뢰도</th><th>어디서 왔나</th>
+      </tr></thead>
       <tbody>${rows}</tbody></table></div>
     <p id="correctionMsg" class="hint"></p>
   </div>`;
@@ -988,13 +1047,14 @@ function renderObservations() {
       : `<span class="badge badge-mask">${o.maskedCount}</span>`;
     return `<tr class="clickable ${state.selected === o.observationId ? 'selected' : ''}" data-id="${esc(o.observationId)}">
       <td>${esc(state.sources[o.observationId] || o.observationId)}</td>
+      <td class="hint">${esc((o.capturedAt || '').slice(0, 16).replace('T', ' ')) || '—'}</td>
       <td class="mono">${esc(o.route)}</td>
       <td>${hint}</td>
       <td class="num">${o.nodeCount}</td>
       <td class="num">${o.namedCount}</td>
       <td class="num">${o.valuedCount}</td>
       <td>${leak}</td>
-      <td>${o.cacheHit ? '<span class="badge">캐시</span>' : '<span class="badge">AI</span>'}</td>
+      <td><span class="badge">${esc(SOURCE_LABEL[o.source] || o.source)}</span></td>
       <td class="mono">${shortSig(o.signature)}</td>
       <td>${scoreBadge(state.scoring.h2[o.observationId])}</td>
     </tr>`;
@@ -1002,9 +1062,9 @@ function renderObservations() {
 
   box.innerHTML = `<table>
     <thead><tr>
-      <th>스냅샷</th><th>route</th><th>레코드(H2)</th>
+      <th>스냅샷</th><th>관측 시각</th><th>route</th><th>레코드(H2)</th>
       <th class="num">노드</th><th class="num">Name</th><th class="num">Value</th>
-      <th>마스킹(H4)</th><th>매핑</th><th>서명</th><th>H2 채점</th>
+      <th>마스킹(H4)</th><th>판단 출처</th><th>서명</th><th>H2 채점</th>
     </tr></thead>
     <tbody>${rows}</tbody></table>`;
 
@@ -1052,15 +1112,27 @@ function renderDetail() {
     </tr>`;
   }).join('');
 
+  // 판단(ref → 개념)과 원본(ref → 라벨·값)을 두 표로 나눠 두면 사람이 ref를 눈으로 대조해야 한다.
+  // 필드가 스무 개면 대조도 스무 번이다 — 판단은 그것이 무엇에 대한 판단인지와 같은 줄에 있어야 한다.
+  const byRef = Object.fromEntries(d.nodes.map((n) => [n.ref, n]));
   const mapRows = d.mapping.length
-    ? d.mapping.map((m) => `<tr>
-        <td class="mono">${esc(m.elementRef)}</td>
-        <td>${esc(m.concept)}</td>
-        <td class="num">${m.confidence.toFixed(2)}</td>
-        <td>${esc(m.provenance)}</td>
+    ? d.mapping.map((m) => {
+        const n = byRef[m.elementRef];
+        return `<tr>
+        <td>
+          ${n?.name ? `<strong>${esc(n.name)}</strong>` : '<span class="badge">라벨 없음</span>'}
+          <div class="hint mono">${esc(m.elementRef)}</div>
+        </td>
+        <td class="mono">${n?.masked
+          ? '<span class="badge badge-mask">마스킹</span>'
+          : (n?.value ? esc(n.value) : '<span class="badge">비어있음</span>')}</td>
+        <td>${esc(conceptLabel(m.concept))} <span class="hint mono">${esc(m.concept)}</span></td>
+        <td class="num">${confidenceCell(m.confidence)}</td>
+        <td>${esc(provenanceLabel(m.provenance))}</td>
         <td>${m.sensitive ? '<span class="badge badge-mask">민감</span>' : ''}</td>
-      </tr>`).join('')
-    : '<tr><td colspan="5" class="empty">매핑된 필드 없음</td></tr>';
+      </tr>`;
+      }).join('')
+    : '<tr><td colspan="6" class="empty">매핑된 필드 없음</td></tr>';
 
   const hint = s.recordHint
     ? `${esc(s.recordHint.value)} <span class="badge">${esc(s.recordHint.source)} · ${esc(s.recordHint.key)}</span>`
@@ -1094,9 +1166,12 @@ function renderDetail() {
       <thead><tr><th>ref</th><th>role</th><th>name</th><th>value</th><th>automationId</th><th>플래그</th></tr></thead>
       <tbody>${nodeRows}</tbody></table></div>
 
-    <h3>적용된 매핑</h3>
+    <h3>AI 판단 <span class="hint">— 화면의 각 칸을 무엇이라고 읽었는지</span></h3>
     <div class="table-scroll"><table>
-      <thead><tr><th>ref</th><th>개념</th><th class="num">신뢰도</th><th>출처</th><th></th></tr></thead>
+      <thead><tr>
+        <th>화면의 칸</th><th>화면의 값</th><th>읽은 개념</th>
+        <th class="num">신뢰도</th><th>어디서 왔나</th><th></th>
+      </tr></thead>
       <tbody>${mapRows}</tbody></table></div>
   </div>`;
 

@@ -96,6 +96,10 @@ main {
   border: 1px solid currentColor; border-radius: 8px;
   padding: 10px 12px; font-size: 13px; margin: 12px 0 0;
 }
+/* 신뢰도 판정 — 숫자 옆에 통과/미달을 색으로도 남긴다 (색만으로 구분되지 않게 문구를 함께 쓴다) */
+.ok { color: var(--pass); font-weight: 600; }
+.warn-text { color: var(--warn); font-weight: 600; }
+
 code { font-family: var(--mono); font-size: .9em; }
 
 /* ── 버튼·필 ──────────────────────────────────────────── */

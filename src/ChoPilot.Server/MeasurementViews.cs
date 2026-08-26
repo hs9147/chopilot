@@ -15,6 +15,14 @@ public sealed record ObservationSummary(
     string Status,
     string Provenance,
     bool CacheHit,
+
+    /// <summary>
+    /// 이 관측이 어디서 답을 얻었는지 — <c>trusted_cache</c> | <c>deferred_cache</c> | <c>ai</c>.
+    /// <see cref="CacheHit"/>는 두 갈래라 <b>재추론 보류(θ 미만 캐시 재사용)를 AI 호출과 구분하지 못한다</b>.
+    /// 그 구분이 없으면 화면이 "AI를 매번 부른다"고 잘못 말하게 된다.
+    /// </summary>
+    string Source,
+
     RecordHint? RecordHint,
     int NodeCount,
     int NamedCount,
@@ -38,6 +46,25 @@ public sealed record ObservationDetail(
     ObservationSummary Summary,
     List<InventoryNode> Nodes,
     List<FieldMapping> Mapping);
+
+/// <summary>화면에 실제로 보였던 필드 1개 — AI 판단을 대조할 원본.</summary>
+public sealed record ScreenField(string Ref, string? Label, string? Value, bool Masked);
+
+/// <summary>
+/// 서명 1개가 가리키는 화면의 필드 목록.
+///
+/// <para>
+/// 검수 큐는 <c>n2 → Vendor</c> 처럼 <b>ref와 정규 개념만</b> 들고 있다. 사람이 그 판단이 맞는지
+/// 보려면 <c>n2</c>가 화면의 어느 칸이었는지를 알아야 하는데, 매핑에는 그 정보가 없다 —
+/// 화면 쪽에만 있다. 그래서 같은 서명의 최근 관측에서 라벨과 값을 끌어와 붙여 준다.
+/// </para>
+/// <para>
+/// 값은 마스킹된 트리에서 온다. <see cref="ScreenField.Masked"/>가 붙은 칸은 원값이 아니라
+/// 가려진 표시다 — 검수 화면이 마스킹 방어선을 우회하는 창구가 되면 안 된다.
+/// </para>
+/// </summary>
+public sealed record ScreenFields(
+    string Signature, string Route, string? Title, DateTimeOffset CapturedAt, List<ScreenField> Fields);
 
 /// <summary>한 화면(route)이 몇 개의 서명으로 갈렸는지 — 캐시 적중률 미달의 1차 원인 진단.</summary>
 public sealed record SignatureGroup(string Signature, int ObservationCount, List<string> ObservationIds);
@@ -71,6 +98,7 @@ public static class MeasurementViews
             Status: stored.Entry.Status,
             Provenance: stored.BusinessObject.Provenance,
             CacheHit: cacheHit,
+            Source: stored.Source,
             RecordHint: evt.Screen.RecordHint,
             NodeCount: nodes.Count,
             NamedCount: nodes.Count(n => !string.IsNullOrWhiteSpace(n.Node.Name)),
@@ -99,6 +127,39 @@ public static class MeasurementViews
             .ToList();
 
         return new ObservationDetail(Summarize(stored, gate, cacheHit), nodes, stored.Entry.Mapping);
+    }
+
+    /// <summary>
+    /// 서명 → 그 화면의 필드 목록. 같은 서명의 관측이 여럿이면 <b>가장 최근 것</b>을 쓴다 —
+    /// 서명이 같다는 건 구조가 같다는 뜻이므로 라벨은 같고, 값만 최근 것이 된다.
+    /// </summary>
+    public static Dictionary<string, ScreenFields> ScreensBySignature(
+        IEnumerable<StoredObservation> observations)
+    {
+        var screens = new Dictionary<string, ScreenFields>(StringComparer.Ordinal);
+
+        foreach (var stored in observations.OrderBy(s => s.Seq))
+        {
+            var evt = stored.Event;
+            var signature = SignatureService.Compute(evt.Screen, evt.Tree);
+            var masked = evt.Privacy.MaskedRefs.ToHashSet();
+
+            // 컨테이너는 판단 대상이 아니다 — 라벨도 값도 없는 노드를 실으면 대조표가 껍데기로 길어진다.
+            var fields = Flatten(evt.Tree)
+                .Select(n => n.Node)
+                .Where(n => !string.IsNullOrWhiteSpace(n.Name) || !string.IsNullOrEmpty(n.Value))
+                .Select(n => new ScreenField(n.Ref, n.Name, n.Value, masked.Contains(n.Ref)))
+                .ToList();
+
+            screens[signature] = new ScreenFields(
+                signature,
+                SignatureService.NormalizeRoute(evt.Screen.Url),
+                evt.Screen.Title,
+                evt.CapturedAt,
+                fields);
+        }
+
+        return screens;
     }
 
     /// <summary>route별로 서명을 묶는다. <c>Split=true</c>면 같은 화면이 여러 서명으로 갈린 것.</summary>

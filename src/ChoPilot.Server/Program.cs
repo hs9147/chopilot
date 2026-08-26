@@ -756,8 +756,16 @@ app.MapPost("/v1/knowledge/{id}/deprecate",
 });
 
 // 검수 큐(HITL) — 저신뢰 매핑 열람. 개인 스코프는 제외된다.
-app.MapGet("/v1/review", (PersonalizationService svc, int? limit) =>
-    Results.Ok(new { entries = svc.ReviewQueue(limit ?? 100) }));
+// 매핑은 ref와 정규 개념만 들고 있다(n2 → Vendor). 사람이 그 판단을 검수하려면 n2가 화면의
+// 어느 칸이었는지 알아야 하는데 그건 화면 쪽에만 있다 — 서명으로 이어 붙여 함께 내려보낸다.
+// thetaHigh도 같이 준다: 신뢰도 0.60이 통과인지 아닌지는 임계치를 알아야만 말할 수 있다.
+app.MapGet("/v1/review", (PersonalizationService svc, ObservationStore store, IConfiguration config, int? limit) =>
+    Results.Ok(new
+    {
+        entries = svc.ReviewQueue(limit ?? 100),
+        screens = MeasurementViews.ScreensBySignature(store.List()),
+        thetaHigh = config.GetValue("Mapping:ThetaHigh", 0.8),
+    }));
 
 // 검수 통과분을 trusted로 승격(HITL). 누가 승인했는지 결정 이력에 남긴다.
 app.MapPost("/v1/review/promote",
