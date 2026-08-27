@@ -11,7 +11,8 @@ using ChoPilot.Server;
 //   POST /v1/observations : 관측 이벤트 → 서명 → 매핑 → Business Object 저장
 //   GET  /v1/guide        : 현재 업무 요약 + 진행률 + 다음작업 힌트(Actionable=false)
 //
-// AI 매퍼는 설정으로 선택: 기본 Stub, Bedrock/Vertex AI(A DC)/Azure OpenAI endpoint.
+// AI 매퍼는 설정으로 선택: 기본 Azure OpenAI, Bedrock/Vertex AI(GCP ADC)/스텁.
+//   설정이 없으면 스텁으로 내려앉고 그 사실이 /v1/llm 과 상단 배지에 나온다.
 // ─────────────────────────────────────────────────────────────────────────────
 
 var builder = WebApplication.CreateBuilder(args);
@@ -137,86 +138,68 @@ builder.Services.AddSingleton(_ =>
 // 서버측 잔존 PII 스캔용(H4 반증). 마스킹 자체는 클라이언트가 이미 수행했다.
 builder.Services.AddSingleton(_ => new PrivacyGate(policyVersion: cfg["Privacy:PolicyVersion"] ?? "1.0"));
 
-var configuredLlmProvider = cfg["Llm:Provider"]?.Trim().ToLowerInvariant();
-var llmProvider = string.IsNullOrWhiteSpace(configuredLlmProvider)
-    ? (cfg.GetValue<bool>("UseBedrock") ? "bedrock" : "stub") // 기존 설정 호환
-    : configuredLlmProvider;
+// ── LLM 공급자 ───────────────────────────────────────────────────────────────
+// 기본은 azure_openai. 명시하지 않은 기본값이 준비돼 있지 않으면 스텁으로 내려앉되
+// 이유를 남긴다 — 설정 없는 서버가 기동조차 못 하면 dotnet run 한 줄로 여는 길이 막힌다.
+//
+// 결정을 DI 팩토리로 미룬다. 여기서 cfg를 즉시 읽으면 나중에 얹히는 설정 원본(테스트의
+// ConfigureAppConfiguration, 환경변수)이 반영되기 전에 공급자가 굳어 버린다 — 인증도 같은 이유로
+// AuthenticationSetup.Create를 팩토리 안에서 부른다.
+builder.Services.AddSingleton(sp =>
+    LlmProviderSetup.Resolve(sp.GetRequiredService<IConfiguration>()));
 
-switch (llmProvider)
+builder.Services.AddSingleton<IAmazonBedrockRuntime>(sp => new AmazonBedrockRuntimeClient(
+    RegionEndpoint.GetBySystemName(
+        sp.GetRequiredService<IConfiguration>()["Aws:Region"] ?? "ap-northeast-2")));
+
+// Vertex는 GCP ADC 체인(Workload Identity · Compute/GKE 서비스 계정 · GOOGLE_APPLICATION_CREDENTIALS ·
+// 개발자 ADC)으로 인증한다. 키 파일을 앱 설정으로 읽지 않는다 — 읽을 자리가 있으면 언젠가 커밋된다.
+builder.Services.AddSingleton<ILlmCompletionClient>(sp =>
 {
-    case "stub":
-        builder.Services.AddSingleton<IAiMapper, StubAiMapper>();
-        break;
-
-    case "bedrock":
+    var c = sp.GetRequiredService<IConfiguration>();
+    var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient("llm");
+    return sp.GetRequiredService<LlmProviderSelection>().Provider switch
     {
-        var region = RegionEndpoint.GetBySystemName(cfg["Aws:Region"] ?? "ap-northeast-2");
-        builder.Services.AddSingleton<IAmazonBedrockRuntime>(_ => new AmazonBedrockRuntimeClient(region));
+        LlmProviderSetup.Vertex => new VertexAiCompletionClient(http, LlmProviderSetup.VertexOptions(c)),
+        LlmProviderSetup.AzureOpenAi => new AzureOpenAiCompletionClient(http, LlmProviderSetup.AzureOptions(c)),
+        var other => throw new InvalidOperationException($"{other}는 completion client를 쓰지 않는다"),
+    };
+});
+
+builder.Services.AddSingleton<IAiMapper>(sp =>
+{
+    var c = sp.GetRequiredService<IConfiguration>();
+    return sp.GetRequiredService<LlmProviderSelection>().Provider switch
+    {
+        LlmProviderSetup.Stub => new StubAiMapper(),
         // 현재 Anthropic 모델은 inference profile ID만 지원(ON_DEMAND base id → ResourceNotFoundException).
-        builder.Services.AddSingleton<IAiMapper>(sp => new BedrockAiMapper(
+        LlmProviderSetup.Bedrock => new BedrockAiMapper(
             sp.GetRequiredService<IAmazonBedrockRuntime>(),
-            cfg["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
-        break;
-    }
-
-    case "vertex":
-    case "vertex_ai":
-    {
-        var vertexOptions = new VertexAiOptions(
-            cfg["Llm:Vertex:ProjectId"] ?? "",
-            cfg["Llm:Vertex:Location"] ?? "",
-            cfg["Llm:Vertex:Model"] ?? "");
-        vertexOptions.Validate(); // 잘못된 설정으로 빈 서버가 뜨는 것을 막는다.
-        builder.Services.AddSingleton<ILlmCompletionClient>(sp => new VertexAiCompletionClient(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient("llm"),
-            vertexOptions));
-        builder.Services.AddSingleton<IAiMapper>(sp => new CompletionClientAiMapper(
-            sp.GetRequiredService<ILlmCompletionClient>()));
-        break;
-    }
-
-    case "azure":
-    case "azure_openai":
-    {
-        var azureOptions = new AzureOpenAiOptions(
-            cfg["Llm:AzureOpenAI:Endpoint"] ?? "",
-            cfg["Llm:AzureOpenAI:Deployment"] ?? "",
-            cfg["Llm:AzureOpenAI:ApiVersion"] ?? "",
-            cfg["Llm:AzureOpenAI:ApiKey"],
-            cfg["Llm:AzureOpenAI:BearerToken"]);
-        azureOptions.Validate(); // credential 누락을 첫 관측까지 미루지 않는다.
-        builder.Services.AddSingleton<ILlmCompletionClient>(sp => new AzureOpenAiCompletionClient(
-            sp.GetRequiredService<IHttpClientFactory>().CreateClient("llm"),
-            azureOptions));
-        builder.Services.AddSingleton<IAiMapper>(sp => new CompletionClientAiMapper(
-            sp.GetRequiredService<ILlmCompletionClient>()));
-        break;
-    }
-
-    default:
-        throw new InvalidOperationException(
-            $"Llm:Provider '{llmProvider}'는 stub|bedrock|vertex|azure_openai 중 하나여야 한다");
-}
+            c["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+        _ => new CompletionClientAiMapper(sp.GetRequiredService<ILlmCompletionClient>()),
+    };
+});
 
 // 지식 초안 서술(§5.5 3단계). 기본은 AI 없음 — 루프는 LLM 없이도 완결된다.
 // Knowledge:UseEditor=true 일 때만 배치에서 초안 1건당 1회 호출된다.
-if (llmProvider == "bedrock" && cfg.GetValue<bool>("Knowledge:UseEditor"))
+builder.Services.AddSingleton<IKnowledgeEditor>(sp =>
 {
-    builder.Services.AddSingleton<IKnowledgeEditor>(sp => new BedrockKnowledgeEditor(
-        sp.GetRequiredService<IAmazonBedrockRuntime>(),
-        cfg["Knowledge:EditorModelId"] ?? cfg["Aws:BedrockModelId"]
-            ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"));
-}
-else if (llmProvider is "vertex" or "vertex_ai" or "azure" or "azure_openai" &&
-         cfg.GetValue<bool>("Knowledge:UseEditor"))
-{
-    builder.Services.AddSingleton<IKnowledgeEditor>(sp => new LlmKnowledgeEditor(
-        sp.GetRequiredService<ILlmCompletionClient>()));
-}
-else
-{
-    builder.Services.AddSingleton<IKnowledgeEditor, PassthroughKnowledgeEditor>();
-}
+    var c = sp.GetRequiredService<IConfiguration>();
+    var provider = sp.GetRequiredService<LlmProviderSelection>().Provider;
+    if (!c.GetValue<bool>("Knowledge:UseEditor")) return new PassthroughKnowledgeEditor();
+
+    return provider switch
+    {
+        LlmProviderSetup.Bedrock => new BedrockKnowledgeEditor(
+            sp.GetRequiredService<IAmazonBedrockRuntime>(),
+            c["Knowledge:EditorModelId"] ?? c["Aws:BedrockModelId"]
+                ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+        LlmProviderSetup.Vertex or LlmProviderSetup.AzureOpenAi =>
+            new LlmKnowledgeEditor(sp.GetRequiredService<ILlmCompletionClient>()),
+        // 스텁으로 내려앉았으면 편집자도 없다 — 없는 AI에 본문을 맡길 수 없다.
+        _ => new PassthroughKnowledgeEditor(),
+    };
+});
 
 builder.Services.AddSingleton(sp => new MappingResolver(
     sp.GetRequiredService<IMappingCache>(),
@@ -258,6 +241,17 @@ var app = builder.Build();
             "{Header} 헤더를 대는 누구든 다른 사용자로 행세할 수 있으므로 " +
             "신뢰 경계 밖(VPC/mTLS 밖)에 노출하면 안 된다.", auth.Method, RequestUser.Header);
 
+    var llmSelection = app.Services.GetRequiredService<LlmProviderSelection>();
+    var llmLog = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Llm");
+    if (llmSelection.FellBack)
+        llmLog.LogWarning("LLM 공급자: {Requested}(기본값)로 뜨지 못해 스텁으로 돈다 — {Reason}. " +
+            "매핑은 별칭 매칭으로만 나오고 신뢰도가 θ를 넘지 못한다.",
+            llmSelection.Requested, llmSelection.FallbackReason);
+    else if (llmSelection.UsingStub)
+        llmLog.LogWarning("LLM 공급자: stub — 실제 AI를 부르지 않는다(별칭 매칭).");
+    else
+        llmLog.LogInformation("LLM 공급자: {Provider}", llmSelection.Provider);
+
     var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Storage");
     if (journals is FileJournalFactory files)
     {
@@ -291,6 +285,20 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+// 어떤 LLM으로 도는지. 기본값(azure_openai)이 준비되지 않아 스텁으로 내려앉았다면
+// 그 사실이 여기와 상단 배지에 나온다 — 조용히 스텁으로 도는 서버는
+// "AI를 붙였다"고 믿는 사람에게 거짓말을 한다.
+app.MapGet("/v1/llm", (LlmProviderSelection selection) => Results.Ok(new
+{
+    provider = selection.Provider,
+    requested = selection.Requested,
+    isExplicit = selection.Explicit,
+    usingStub = selection.UsingStub,
+    fellBack = selection.FellBack,
+    fallbackReason = selection.FallbackReason,
+    knowledgeEditor = cfg.GetValue<bool>("Knowledge:UseEditor"),
+}));
 
 // 인증 상태 (ARCHITECTURE §8). verified=false면 헤더를 대는 누구든 사칭할 수 있다는 뜻이다.
 app.MapGet("/v1/auth", (IUserPrincipalResolver resolver, HttpRequest request) => Results.Ok(new

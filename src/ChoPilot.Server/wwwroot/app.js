@@ -47,6 +47,7 @@ const state = {
   entities: null,         // 엔티티 결정 결과(H5)
   completions: null,      // 작업 완료 신호 집계(필수 필드 규칙의 증거)
   storage: null,          // 영속화 상태 — durable=false면 재시작에 전부 사라진다
+  llm: null,              // 어떤 LLM으로 도는지 — 기본값이 준비 안 되면 스텁으로 내려앉는다
   auth: null,             // 주체 해석 방식 — verified=false면 헤더로 누구든 사칭할 수 있다
   foundation: null,       // 기반 출처 상태 + 마스터 요약
   reconcile: null,        // 관측 ↔ 마스터 대사 결과
@@ -327,12 +328,12 @@ async function refreshAll() {
   try {
     const [metrics, observations, signatures, review, decisions, suggestions, ontology,
            knowledge, signals, entities, foundation, reconcile, completions, storage, auth,
-           proposals, inferences] = await Promise.all([
+           proposals, llm, inferences] = await Promise.all([
       api('/v1/metrics'), api('/v1/observations'), api('/v1/signatures'),
       api('/v1/review'), api('/v1/decisions?limit=20'), api('/v1/suggestions?limit=1'), api('/v1/ontology'),
       api('/v1/knowledge', asUser()), api('/v1/knowledge/signals'), api('/v1/entities'),
       api('/v1/foundation'), api('/v1/foundation/reconcile'), api('/v1/completions?limit=1'),
-      api('/v1/storage'), api('/v1/auth'), api('/v1/proposals?limit=100'),
+      api('/v1/storage'), api('/v1/auth'), api('/v1/proposals?limit=100'), api('/v1/llm'),
       // 개인 스코프를 본인 것만 실으려면 주체가 필요하다 — 측정자가 비어 있으면 부르지 않는다.
       state.actor ? api('/v1/inferences?limit=200', asUser()) : Promise.resolve(null),
     ]);
@@ -360,6 +361,7 @@ async function refreshAll() {
     state.completions = completions;
     state.storage = storage;
     state.auth = auth;
+    state.llm = llm;
     state.myProfile = knowledge.items.find((d) => d.kind === 'view' && d.axis === 'user') || null;
     $('health').className = 'pill pill-pass';
     $('health').textContent = '서버 연결됨';
@@ -380,6 +382,7 @@ async function refreshAll() {
   renderAuto();
   renderStorage();
   renderAuth();
+  renderLlm();
   renderFoundation();
   renderObservations();
   renderVerdict();
@@ -1168,6 +1171,35 @@ async function aggregate(dryRun) {
 /* ── 인증 ─────────────────────────────────────────────── */
 
 // 이 배지가 노란색이면 이 서버는 신뢰 경계 밖에 두면 안 된다 — 헤더 한 줄로 누구든 사칭한다.
+// 조용히 스텁으로 도는 서버는 "AI를 붙였다"고 믿는 사람에게 거짓말을 한다 —
+// 기본값이 준비되지 않아 내려앉았으면 그 이유까지 배지에 담는다.
+function renderLlm() {
+  const pill = $('llm');
+  const l = state.llm;
+  if (!l) {
+    pill.className = 'pill pill-muted';
+    pill.textContent = 'LLM —';
+    return;
+  }
+
+  const LABEL = { stub: '스텁', bedrock: 'Bedrock', vertex: 'Vertex AI', azure_openai: 'Azure OpenAI' };
+  const name = LABEL[l.provider] || l.provider;
+
+  if (l.fellBack) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = `LLM 스텁 (${LABEL[l.requested] || l.requested} 미설정)`;
+    pill.title = l.fallbackReason;
+  } else if (l.usingStub) {
+    pill.className = 'pill pill-warn';
+    pill.textContent = 'LLM 스텁';
+    pill.title = '실제 AI를 부르지 않는다 — 별칭 매칭이라 신뢰도가 θ를 넘지 못한다.';
+  } else {
+    pill.className = 'pill pill-pass';
+    pill.textContent = `LLM ${name}`;
+    pill.title = l.isExplicit ? `Llm:Provider=${l.provider}` : `기본값 ${l.provider}`;
+  }
+}
+
 function renderAuth() {
   const pill = $('auth');
   const a = state.auth;

@@ -13,10 +13,11 @@ dotnet run --project src/ChoPilot.Server      # → http://localhost:5080
 ```
 
 브라우저로 열면 측정 콘솔이 뜬다. 이 상태는 **인메모리 · 인증 없음 · AI 없음(스텁)** 이다.
-상단 배지 두 개가 그걸 항상 알려 준다.
+상단 배지 세 개가 그걸 항상 알려 준다.
 
 | 배지 | 뜻 |
 |---|---|
+| `LLM 스텁 (Azure OpenAI 미설정)` | 기본 공급자는 `azure_openai`인데 설정이 없어 스텁으로 내려앉았다 |
 | `인증 없음 (헤더 자칭)` | `X-ChoPilot-User` 헤더를 그대로 믿는다 — 신뢰 경계 밖에 두지 마라 |
 | `인메모리` | 재시작하면 지식·매핑 캐시·감사 로그가 사라진다 |
 
@@ -89,8 +90,24 @@ Storage__Path=/var/lib/chopilot
 
 ### 2.5 LLM 공급자 선택
 
-기본은 `stub`이다. `Llm:Provider`를 비워 두면 이전 설정과 호환되어 `UseBedrock=true`일 때만
-Bedrock을 고른다. 명시적으로 선택하면 `stub | bedrock | vertex | azure_openai` 중 하나여야 한다.
+**기본은 `azure_openai`다.** `Llm:Provider`를 비워 두면 Azure OpenAI를 고른다
+(`UseBedrock=true`를 적어 둔 기존 설정은 그대로 Bedrock을 고른다).
+명시적으로 선택하면 `stub | bedrock | vertex | azure_openai` 중 하나여야 한다 —
+`azure` · `vertex_ai` 같은 표기도 받는다.
+
+**기본값이 준비돼 있지 않으면 스텁으로 내려앉는다.** 설정 없는 서버가 기동조차 못 하면
+`dotnet run` 한 줄로 콘솔을 여는 길이 막히고 테스트도 자격증명을 요구하게 된다.
+대신 조용히 내려앉지는 않는다 — 기동 로그가 경고하고, `/v1/llm`과 상단 배지가 이유를 적는다:
+
+```bash
+curl -s localhost:5080/v1/llm
+# {"provider":"stub","requested":"azure_openai","fellBack":true,
+#  "fallbackReason":"azure_openai 설정이 없어 스텁으로 돈다 — Llm:AzureOpenAI:Endpoint는 https 절대 URL이어야 한다"}
+```
+
+**반대로 직접 적어 둔 공급자의 설정이 틀리면 기동을 거부한다.** `Llm:Provider=azure_openai`라고
+써 놓고 엔드포인트를 빼먹었다면 그건 오타지 기본값이 아니다 — 조용히 스텁으로 도는 서버는
+"AI를 붙였다"고 믿는 사람에게 거짓말을 한다.
 
 #### Bedrock
 
@@ -145,8 +162,8 @@ dotnet run --project src/ChoPilot.Server
 | `Auth:Jwt:SigningKey` / `Issuer` / `Audience` | — | jwt 모드 필수. Production에서는 모두 필수이며 issuer/audience를 검증 |
 | `Storage:Path` | (없음) | 저널 디렉터리. 비면 인메모리 |
 | `UseBedrock` | `false` | 실 AI 추론 |
-| `Llm:Provider` | (빈 값) | `stub` | `bedrock` | `vertex` | `azure_openai`. 빈 값은 기존 `UseBedrock` 호환 |
-| `Llm:Vertex:ProjectId` / `Location` / `Model` | — | Vertex AI `generateContent`; 인증은 ADC |
+| `Llm:Provider` | (빈 값 → **`azure_openai`**) | `stub` \| `bedrock` \| `vertex` \| `azure_openai`. 미설정 기본값이 준비 안 되면 스텁으로 내려앉고 `/v1/llm`에 이유가 남는다 |
+| `Llm:Vertex:ProjectId` / `Location` / `Model` | — | Vertex AI `generateContent`. 인증은 **GCP ADC 체인** — 키 파일을 설정에 넣지 않는다 |
 | `Llm:AzureOpenAI:Endpoint` / `Deployment` / `ApiVersion` | — | Azure OpenAI Chat Completions deployment |
 | `Llm:AzureOpenAI:ApiKey` / `BearerToken` | — | 둘 중 정확히 하나만. 소스·설정 파일에 커밋 금지 |
 | `Knowledge:UseEditor` | `false` | 초안 본문을 선택한 Bedrock·Vertex·Azure LLM이 다듬음 |
