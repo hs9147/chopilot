@@ -86,7 +86,7 @@ public sealed class ProposalEngine
     }
 
     /// <summary>
-    /// 종류별 문턱 — <b>정확성·유용성</b>으로 움직인다. 실행 가능성은 보지 않는다.
+    /// 종류별 문턱 — <b>종합평가(세 축 기하평균)</b>로 움직인다. 정확성은 별도 게이트를 하나 더 갖는다.
     ///
     /// <para>
     /// 채택률이 아니라 평점을 쓰는 이유: "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔하고,
@@ -112,14 +112,19 @@ public sealed class ProposalEngine
 
             var accuracy = outcome.MeanAccuracy!.Value;
             var mean = outcome.MeanQuality!.Value;
-            var seen = $"정확성 {accuracy:0.0} · 유용성 {outcome.MeanUsefulness:0.0}"
-                + $" · 실행 가능성 {outcome.MeanActionability:0.0} ({outcome.Rated}건 평가)";
+            var usefulness = outcome.MeanUsefulness!.Value;
+            var actionability = outcome.MeanActionability!.Value;
+            var seen = $"정확성 {accuracy:0.0} · 유용성 {usefulness:0.0}"
+                + $" · 실행 가능성 {actionability:0.0} ({outcome.Rated}건 평가)";
 
-            // 실행 가능성이 낮아도 기준은 건드리지 않는다. 못 하는 것과 틀린 것은 다르다 —
-            // 뭉치면 옳게 찾아낸 종류가 조직 사정 때문에 조용히 꺼진다.
-            if (outcome.MeanActionability < 2.0)
-                notes.Add($"{outcome.Kind}: 실행 가능성 {outcome.MeanActionability:0.0} — 낮지만 기준은 그대로 둔다"
-                    + " (고칠 곳이 생성기가 아니라 조직 쪽일 수 있다)");
+            // 종합평가는 기하평균이라 실행 가능성도 문턱을 끌어내린다. 다만 그것 때문에 낮은
+            // 경우인지는 구분해 둔다 — 고칠 곳이 생성기가 아니라 조직 쪽일 수 있다.
+            var blamedOnActionability = actionability < 2.0 && accuracy >= 3.0 && usefulness >= 3.0;
+            if (actionability < 2.0)
+                notes.Add($"{outcome.Kind}: 실행 가능성 {actionability:0.0}"
+                    + (blamedOnActionability
+                        ? " — 정확성·유용성은 멀쩡하다. 종합평가가 낮은 원인이 여기라면 고칠 곳은 생성기가 아니라 조직 쪽이다"
+                        : " — 낮다"));
 
             // 정확성이 낮으면 문턱을 올려도 소용없다 — 없는 현상을 말하는 것 중 점수 높은 것이 남는다.
             if (accuracy < ProposalCriteria.MinAccuracy)
@@ -144,32 +149,42 @@ public sealed class ProposalEngine
                 {
                     rules[index] = rule with { MinScore = to };
                     changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
-                        $"품질 {mean:0.0} — {seen} — 문턱을 올린다"));
+                        $"종합평가 {mean:0.0} — {seen} — 문턱을 올린다"));
                     continue;
                 }
             }
 
             if (mean < 2.5)
             {
+                // 종합평가가 낮은 원인이 실행 가능성뿐이면 끄지 않는다. 끄면 그 종류는 다시
+                // 제안되지 않고, 조직 사정이 풀렸을 때 그 사실을 알 방법이 사라진다.
+                // 문턱은 이미 상한까지 올라가 있으므로 억제는 걸려 있다.
+                if (blamedOnActionability)
+                {
+                    notes.Add($"{outcome.Kind}: 문턱 상한에서도 종합평가 {mean:0.0}이지만 끄지 않는다 —"
+                        + $" 원인이 실행 가능성({actionability:0.0})이지 생성기가 아니다 · {seen}");
+                    continue;
+                }
+
                 // 문턱을 이미 끝까지 올렸는데도 낮게 평가된다 — 점수가 아니라 종류가 틀렸다.
                 rules[index] = rule with
                 {
                     Enabled = false,
-                    DisabledReason = $"문턱 {rule.MinScore:0.00}에서도 품질 {mean:0.0} — {seen}",
+                    DisabledReason = $"문턱 {rule.MinScore:0.00}에서도 종합평가 {mean:0.0} — {seen}",
                 };
                 changes.Add(new CriteriaChange(outcome.Kind, "Enabled", 1, 0,
-                    $"문턱을 올려도 품질 {mean:0.0} — 이 종류를 끈다"));
+                    $"문턱을 올려도 종합평가 {mean:0.0} — 이 종류를 끈다"));
             }
             else if (mean > 3.8 && rule.MinScore > 0.2)
             {
                 var to = Math.Round(Math.Max(0.2, rule.MinScore - 0.05), 2);
                 rules[index] = rule with { MinScore = to };
                 changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
-                    $"품질 {mean:0.0} — {seen} — 문턱을 내려 더 올린다"));
+                    $"종합평가 {mean:0.0} — {seen} — 문턱을 내려 더 올린다"));
             }
             else
             {
-                notes.Add($"{outcome.Kind}: 품질 {mean:0.0} — 조정 구간(2.5~3.8점) 안이라 그대로 둔다 · {seen}");
+                notes.Add($"{outcome.Kind}: 종합평가 {mean:0.0} — 조정 구간(2.5~3.8) 안이라 그대로 둔다 · {seen}");
             }
         }
 

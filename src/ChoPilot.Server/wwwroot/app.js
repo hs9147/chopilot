@@ -518,6 +518,11 @@ function renderProposalCriteria() {
       ? `${o.meanAccuracy.toFixed(1)} / ${o.meanUsefulness.toFixed(1)} / ${o.meanActionability.toFixed(1)}`
         + ` <span class="hint">(${o.rated}건)</span>`
       : `<span class="hint">평가 없음</span>`;
+    // 종합평가는 기하평균이라 하나라도 0이면 0이다 — 그 사실을 숫자 옆에 적는다.
+    const composite = o && o.rated > 0
+      ? `<span class="${o.meanQuality < 2.5 ? 'warn-text' : 'ok'}">${o.meanQuality.toFixed(2)}</span>`
+        + (o.meanQuality === 0 ? ' <span class="hint">한 축이 0</span>' : '')
+      : `<span class="hint">—</span>`;
     const rate = o && o.decided > 0
       ? `<span class="hint">${pct(o.acceptanceRate)}</span>`
       : `<span class="hint">—</span>`;
@@ -531,6 +536,7 @@ function renderProposalCriteria() {
       <td class="num">${r.minScore.toFixed(2)}</td>
       <td class="num">${o ? o.proposed : 0}</td>
       <td class="num">${rating}</td>
+      <td class="num">${composite}</td>
       <td class="num">${rate}</td>
     </tr>`;
   }).join('');
@@ -544,7 +550,8 @@ function renderProposalCriteria() {
       <thead><tr>
         <th>종류</th><th>상태</th><th class="num">최소 관측</th><th class="num">최소 인원</th>
         <th class="num">최소 점수</th><th class="num">제안</th>
-        <th class="num">평균 평가<br><span class="hint">정확성/유용성/실행</span></th><th class="num">채택률<br><span class="hint">참고</span></th>
+        <th class="num">평균 평가<br><span class="hint">정확성/유용성/실행</span></th>
+        <th class="num">종합<br><span class="hint">기하평균</span></th><th class="num">채택률<br><span class="hint">참고</span></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -557,6 +564,9 @@ const RATING_AXES = [
   ['usefulness', '유용성', '알 가치가 있나'],
   ['actionability', '실행 가능성', '우리가 할 수 있나 (기준을 움직이지 않는다)'],
 ];
+
+// 종합평가 = 세 축의 기하평균. 하나라도 0이면 0 — 곱이라 그렇게 된다.
+const geometricMean = (r) => Math.cbrt(r.accuracy * r.usefulness * r.actionability);
 
 function ratingAxes(i) {
   const options = [0, 1, 2, 3, 4, 5]
@@ -705,7 +715,9 @@ async function decideProposal(proposal, accept, rating, button) {
       msg.textContent = `${accept ? '채택' : '기각'}됨 — `
         + (rating
           ? `정확성 ${rating.accuracy} · 유용성 ${rating.usefulness} · 실행 가능성 ${rating.actionability}`
-            + ' 가 기준 학습에 들어간다 (실행 가능성은 기준을 움직이지 않는다).'
+            + ` → 종합 ${geometricMean(rating).toFixed(2)}`
+            + (geometricMean(rating) === 0 ? ' (한 축이 0이라 종합도 0이다)' : '')
+            + ' — 기준 학습에 들어간다.'
           : '평가를 매기지 않아 기준 학습에는 쓰이지 않는다.');
       await refreshAll();
     } catch (err) {

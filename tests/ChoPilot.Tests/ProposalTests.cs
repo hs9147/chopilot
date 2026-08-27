@@ -78,6 +78,44 @@ public class ProposalScoringTests
         score.Dimensions.Single(d => d.Name == name);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 종합평가 — 세 항목의 기하평균. 세 축은 더해서 메우는 관계가 아니라
+// 전부 있어야 성립하는 조건이다.
+// ─────────────────────────────────────────────────────────────────────────────
+public class ProposalRatingTests
+{
+    [Theory]
+    [InlineData(0, 5, 5)]
+    [InlineData(5, 0, 5)]
+    [InlineData(5, 5, 0)]
+    [InlineData(0, 0, 0)]
+    public void AnyZero_MakesTheCompositeZero(int accuracy, int usefulness, int actionability)
+    {
+        var rating = new ProposalRating(accuracy, usefulness, actionability);
+        Assert.Equal(0, rating.Quality);
+    }
+
+    [Fact]
+    public void Composite_IsTheGeometricMeanOfTheThree()
+    {
+        Assert.Equal(3, new ProposalRating(3, 3, 3).Quality, 6);
+        Assert.Equal(5, new ProposalRating(5, 5, 5).Quality, 6);
+        Assert.Equal(Math.Cbrt(2 * 4 * 5), new ProposalRating(2, 4, 5).Quality, 6);
+    }
+
+    // 곱이라 치우침에 벌점이 붙는다 — 산술평균은 한 축의 붕괴를 다른 축이 메워 준다.
+    [Fact]
+    public void Composite_PunishesImbalance_MoreThanAnArithmeticMeanWould()
+    {
+        var lopsided = new ProposalRating(5, 5, 1);
+        var balanced = new ProposalRating(3, 4, 4);
+
+        Assert.Equal(Math.Cbrt(25), lopsided.Quality, 6);           // ≈ 2.92
+        Assert.True(balanced.Quality > lopsided.Quality);           // 산술이면 3.67 > 3.67 로 뒤집힌다
+        Assert.True(lopsided.Quality < (5 + 5 + 1) / 3.0);
+    }
+}
+
 public class ProposalApiTests
 {
     private static HttpRequestMessage As(HttpMethod method, string url, string user, object? body = null)
@@ -271,9 +309,11 @@ public class ProposalApiTests
             .Single(o => o.GetProperty("kind").GetString() == kind);
         Assert.Equal(0, outcome.GetProperty("acceptanceRate").GetDouble());
         Assert.Equal(5, outcome.GetProperty("meanUsefulness").GetDouble());
-        // 실행 가능성이 0이어도 품질은 5다 — 못 하는 것과 틀린 것은 다르다.
         Assert.Equal(0, outcome.GetProperty("meanActionability").GetDouble());
-        Assert.Equal(5, outcome.GetProperty("meanQuality").GetDouble());
+
+        // 종합평가는 기하평균이라 하나라도 0이면 0이다 — 세 축은 더해서 메우는 관계가 아니다.
+        // 산술평균이었다면 3.3으로 남아 "괜찮은 제안"처럼 보였을 자리다.
+        Assert.Equal(0, outcome.GetProperty("meanQuality").GetDouble());
     }
 
     // 겹친 생성이 같은 제안을 두 번 만들면 안 된다.
@@ -376,7 +416,7 @@ public class ProposalTuningTests
 
         Assert.True(result.Changed);
         Assert.True(store.Current(Now).RuleFor(ProposalKind.MasterGap)!.MinScore < before);
-        Assert.Contains(result.Changes, c => c.Reason.Contains("품질"));
+        Assert.Contains(result.Changes, c => c.Reason.Contains("종합평가"));
     }
 
     [Fact]
@@ -384,7 +424,7 @@ public class ProposalTuningTests
     {
         var store = new ProposalStore();
         var before = store.Current(Now).RuleFor(ProposalKind.Rework)!.MinScore;
-        SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 4, usefulness: 0));   // 품질 2.0
+        SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 4, usefulness: 1));   // 기하 cbrt(4·1·3)=2.29
 
         var result = Engine(store).Tune();
 
@@ -393,7 +433,7 @@ public class ProposalTuningTests
 
         var after = store.Current(Now);
         Assert.True(after.RuleFor(ProposalKind.Rework)!.MinScore > before);
-        Assert.Contains("품질", after.Rationale);
+        Assert.Contains("종합평가", after.Rationale);
         Assert.Equal(2, store.CriteriaHistory().Count);   // 덮이지 않고 쌓인다
     }
 
@@ -437,22 +477,30 @@ public class ProposalTuningTests
         Assert.Contains(result.Changes, c => c.Reason.Contains("정확성"));
     }
 
-    // 못 하는 것과 틀린 것은 다르다. 실행 가능성이 0이어도 옳게 찾아낸 종류를 벌하지 않는다.
+    // 종합평가는 기하평균이라 실행 가능성 0이 전체를 0으로 만든다 — 문턱은 올라간다.
+    // 다만 원인이 실행 가능성뿐이면 <b>끄지는 않는다</b>: 끄면 조직 사정이 풀렸을 때
+    // 그 사실을 알 방법이 사라진다.
     [Fact]
-    public void LowActionability_DoesNotMoveTheCriteria_ButIsReported()
+    public void ActionabilityZero_RaisesTheBar_ButNeverDisablesTheKind()
     {
         var store = new ProposalStore();
-        var before = store.Current(Now).RuleFor(ProposalKind.MasterGap)!;
-        SeedRatings(store, ProposalKind.MasterGap,
-            Ratings(6, accuracy: 5, usefulness: 5, actionability: 0));
+        var engine = Engine(store);
+        var before = store.Current(Now).RuleFor(ProposalKind.MasterGap)!.MinScore;
 
-        var result = Engine(store).Tune();
-        var after = store.Current(Now).RuleFor(ProposalKind.MasterGap)!;
+        for (var round = 0; round < 10; round++)
+        {
+            SeedRatings(store, ProposalKind.MasterGap,
+                Ratings(6, accuracy: 5, usefulness: 5, actionability: 0));
+            engine.Tune();
+        }
 
-        Assert.True(after.Enabled);                       // 꺼지지 않는다
-        Assert.True(after.MinScore < before.MinScore);    // 오히려 품질이 높아 문턱이 내려간다
-        Assert.Contains(result.Notes,
-            n => n.Contains("실행 가능성") && n.Contains("조직 쪽일 수 있다"));
+        var rule = store.Current(Now).RuleFor(ProposalKind.MasterGap)!;
+        Assert.True(rule.MinScore > before);   // 억제는 걸린다
+        Assert.True(rule.Enabled);             // 그러나 꺼지지 않는다
+
+        var last = engine.Tune();
+        Assert.Contains(last.Notes,
+            n => n.Contains("끄지 않는다") && n.Contains("실행 가능성"));
     }
 
     // 문턱을 끝까지 올렸는데도 낮게 평가된다면 점수가 아니라 종류가 틀렸다.
@@ -464,13 +512,13 @@ public class ProposalTuningTests
 
         for (var round = 0; round < 8; round++)
         {
-            SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 4, usefulness: 0));
+            SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 4, usefulness: 1));
             engine.Tune();
         }
 
         var rule = store.Current(Now).RuleFor(ProposalKind.Rework)!;
         Assert.False(rule.Enabled);
-        Assert.Contains("품질", rule.DisabledReason);   // 이유 없이 꺼진 규칙은 되살릴 근거도 없다
+        Assert.Contains("종합평가", rule.DisabledReason);   // 이유 없이 꺼진 규칙은 되살릴 근거도 없다
     }
 
     // 조정 구간 안이면 흔들지 않는다 — 매번 움직이면 기준이 잡음을 따라간다.

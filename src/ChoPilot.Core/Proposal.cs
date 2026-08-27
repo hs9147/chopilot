@@ -56,9 +56,19 @@ public sealed record ProposalRating(int Accuracy, int Usefulness, int Actionabil
     public const int Max = 5;
 
     /// <summary>
-    /// 문턱을 움직이는 합성 점수. <b>실행 가능성은 빠진다</b> — 못 하는 것과 틀린 것은 다르다.
+    /// 종합평가 — 세 항목의 <b>기하평균</b>. 문턱을 움직이는 값이다.
+    ///
+    /// <para>
+    /// 곱이라 <b>하나라도 0이면 0</b>이다. 세 축은 더해서 메우는 관계가 아니라 <b>전부 있어야</b>
+    /// 성립하는 조건이기 때문이다 — 사실이 아니거나(정확성 0), 알 가치가 없거나(유용성 0),
+    /// 아예 할 수 없으면(실행 가능성 0) 나머지가 만점이어도 제안으로서 값이 없다.
+    /// 산술평균이면 5·5·0이 3.3으로 남아 "괜찮은 제안"처럼 보인다.
+    /// </para>
+    /// <para>
+    /// 곱이므로 <b>치우침에도 벌점이 붙는다</b>: 5·5·1은 기하 2.92, 산술 3.67이다.
+    /// </para>
     /// </summary>
-    public double Quality => (Accuracy + Usefulness) / 2.0;
+    public double Quality => Math.Cbrt((double)Accuracy * Usefulness * Actionability);
 
     public static bool IsValid(int value) => value is >= Min and <= Max;
 
