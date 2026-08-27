@@ -149,6 +149,56 @@ dotnet run --project src/ChoPilot.Server
 
 `Knowledge__UseEditor=true`이면 선택한 Bedrock·Vertex·Azure 공급자가 지식 초안 서술에도 쓰인다.
 
+##### `Endpoint`는 어디까지인가 — 그리고 404가 났을 때
+
+`Endpoint`는 **리소스 호스트까지**만 적는다. 나머지 경로는 서버가 붙인다:
+
+```
+{Endpoint}/openai/deployments/{Deployment}/chat/completions?api-version={ApiVersion}
+```
+
+| 적은 값 | 실제로 보내는 경로 |
+|---|---|
+| `https://<resource>.openai.azure.com` | `/openai/deployments/<d>/chat/completions?api-version=…` ✅ |
+| `https://<resource>.openai.azure.com/` | 위와 동일 (후행 `/`는 잘라낸다) ✅ |
+| `https://<resource>.openai.azure.com/openai/v1` | `/openai/v1/openai/deployments/…` ❌ 404 |
+
+경로를 붙여도 **기동은 통과한다** — https 절대 URL이면 형식상 맞기 때문이다. APIM 같은
+게이트웨이를 앞에 두면 경로 접두사가 정당한 경우도 있어서 기동 시점에 거부하지 않는다.
+대신 **첫 관측에서 나는 404가 스스로를 설명한다**: 예외 문구에 공급자가 보낸 원인 코드와
+우리가 실제로 요청한 URL이 함께 실린다.
+
+```
+Azure OpenAI returned 404 (Not Found) for POST
+https://<resource>.openai.azure.com/openai/v1/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21:
+{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist. …"}}
+```
+
+`/openai`가 두 번 들어간 것이 그 한 줄에서 보인다. 404가 났을 때 위에서부터 짚는다.
+
+1. **`/openai`가 두 번** 나오면 `Endpoint`에서 경로를 뗀다.
+2. `DeploymentNotFound` — `Deployment`는 **모델명이 아니라 배포 이름**이다.
+   Azure AI Foundry의 *Deployments* 목록에 뜨는 이름을 그대로 쓴다 (`gpt-4o`가 아니라
+   `gpt-4o-prod`처럼 직접 지은 이름인 경우가 많다).
+3. 호스트가 `*.services.ai.azure.com`이면 **다른 리소스 종류**다. Azure OpenAI 리소스의
+   `*.openai.azure.com` 엔드포인트를 쓴다.
+4. `api-version`이 그 경로를 모를 수도 있다. 리소스가 지원하는 버전으로 바꿔 본다.
+5. 이 코드베이스는 **classic deployment 경로만** 말한다. 신형 `/openai/v1` 서피스는
+   구현돼 있지 않으므로 `Endpoint`에 그 경로를 넣어도 닿지 않는다.
+
+서버를 거치지 않고 한 줄로 같은 것을 확인할 수 있다.
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  -X POST "$ENDPOINT/openai/deployments/$DEPLOYMENT/chat/completions?api-version=2024-10-21" \
+  -H "api-key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"ping"}],"max_tokens":1}'
+```
+
+Vertex AI도 같은 방식으로 실패를 설명한다 — 403이면 문구에 `PERMISSION_DENIED`와 함께
+`projects/…/locations/…/models/…` 경로가 실려서, 권한 문제인지 프로젝트·리전이 다른 것인지
+바로 갈린다.
+
 ---
 
 ## 3. 설정 한눈에

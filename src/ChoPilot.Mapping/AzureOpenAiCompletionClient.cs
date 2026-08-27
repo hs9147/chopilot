@@ -69,9 +69,13 @@ public sealed class AzureOpenAiCompletionClient : ILlmCompletionClient
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.BearerToken);
 
         using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        // 성공이든 실패든 본문을 한 번만 읽는다. 실패 본문에 원인이 적혀 있다 —
+        // Azure의 404는 DeploymentNotFound 인지 잘못된 api-version 인지를 코드로 말해 준다.
+        var body = await response.Content.ReadAsStringAsync(ct);
         if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"Azure OpenAI returned {(int)response.StatusCode} ({response.ReasonPhrase})");
-        return Parse(await response.Content.ReadAsStringAsync(ct));
+            throw new HttpRequestException(LlmError.Describe(
+                "Azure OpenAI", (int)response.StatusCode, response.ReasonPhrase, body, request.RequestUri));
+        return Parse(body);
     }
 
     public static Uri Endpoint(AzureOpenAiOptions options)

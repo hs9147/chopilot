@@ -25,6 +25,41 @@ public interface ILlmCompletionClient
         bool requireJsonObject, CancellationToken ct = default);
 }
 
+/// <summary>
+/// LLM 공급자가 실패를 돌려줬을 때 예외 문구를 만든다.
+///
+/// <para>
+/// <b>응답 본문을 버리지 않는다.</b> 상태 코드만 남기면 "404"가 배포 이름이 틀린 것인지,
+/// api-version이 그 경로를 모르는 것인지, 엔드포인트가 다른 리소스인지 구분되지 않는다 —
+/// 그런데 그 답은 공급자가 이미 본문에 적어 보낸다(Azure는 <c>DeploymentNotFound</c> 같은
+/// 코드까지 준다). 원인을 손에 쥐고 버리는 셈이다.
+/// </para>
+/// <para>
+/// <b>보낸 URL도 함께 적는다.</b> 본문은 "그 배포가 없다"까지만 말하고, 어떤 이름으로
+/// 물었는지는 말하지 않는다 — 설정한 <c>Endpoint</c>에 경로가 붙어 있어
+/// <c>/openai</c>가 두 번 들어간 경우가 여기서만 보인다.
+/// </para>
+/// <para>
+/// 본문은 잘라 담는다. 공급자가 HTML 오류 페이지를 돌려주는 경우가 있어 통째로 실으면
+/// 로그 한 줄이 화면을 덮는다. <b>두 공급자 모두 자격증명을 요청 헤더로 보내므로</b>
+/// (Azure는 <c>api-key</c>, Vertex는 ADC Bearer) URL·본문 어디에도 키가 없다.
+/// </para>
+/// </summary>
+internal static class LlmError
+{
+    private const int SnippetLength = 300;
+
+    public static string Describe(string provider, int status, string? reason, string body, Uri? requested = null)
+    {
+        var trimmed = body.Trim();
+        var snippet = trimmed.Length <= SnippetLength ? trimmed : trimmed[..SnippetLength] + "…";
+        var at = requested is null ? "" : $" for POST {requested}";
+        return string.IsNullOrEmpty(snippet)
+            ? $"{provider} returned {status} ({reason}){at} — 응답 본문 없음"
+            : $"{provider} returned {status} ({reason}){at}: {snippet}";
+    }
+}
+
 /// <summary>캐시 미스 시 트리→개념 매핑을 추론 (ARCHITECTURE §5.2 step 4).</summary>
 public interface IAiMapper
 {

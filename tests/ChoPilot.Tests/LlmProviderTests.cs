@@ -28,6 +28,21 @@ public class LlmProviderTests
         }
     }
 
+    /// <summary>실패 응답을 그대로 돌려주는 핸들러. 404 본문에 원인이 들어 있다.</summary>
+    private sealed class FailingHandler : HttpMessageHandler
+    {
+        private readonly HttpStatusCode _status;
+        private readonly string _body;
+
+        public FailingHandler(HttpStatusCode status, string body) => (_status, _body) = (status, body);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(_status)
+            {
+                Content = new StringContent(_body, Encoding.UTF8, "application/json"),
+            });
+    }
+
     private static readonly UiNode Tree = new("root", "Form", "구매 요청", null, null, new()
     {
         new("material", "Edit", "품목 코드", "M-001", "txtMaterial", new()),
@@ -116,5 +131,86 @@ public class LlmProviderTests
         Assert.Equal("편집 결과", result.Text);
         using var body = JsonDocument.Parse(handler.Body!);
         Assert.False(body.RootElement.TryGetProperty("response_format", out _));
+    }
+
+    // 404만 남기면 배포 이름이 틀린 것인지, api-version 이 그 경로를 모르는 것인지,
+    // 엔드포인트가 다른 리소스인지 구분되지 않는다 — 그 답은 공급자가 본문에 적어 보낸다.
+    [Fact]
+    public async Task AzureFailure_CarriesTheResponseBody_NotJustTheStatus()
+    {
+        const string azure404 = """
+            {"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}
+            """;
+        using var http = new HttpClient(new FailingHandler(HttpStatusCode.NotFound, azure404));
+        var client = new AzureOpenAiCompletionClient(http,
+            new AzureOpenAiOptions("https://example.openai.azure.com", "gpt-4o", "2024-10-21", "key", null));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.CompleteAsync("s", "u", 100, requireJsonObject: true));
+
+        Assert.Contains("404", ex.Message);
+        Assert.Contains("DeploymentNotFound", ex.Message);          // 원인이 그대로 실린다
+        Assert.Contains("Azure OpenAI", ex.Message);
+        // 본문은 "그 배포가 없다"까지만 말한다 — 어떤 이름으로 물었는지는 URL에만 있다.
+        Assert.Contains("/openai/deployments/gpt-4o/chat/completions?api-version=2024-10-21", ex.Message);
+    }
+
+    // Endpoint에 경로를 붙여 둔 흔한 오설정. 서명 검사만으로는 기동이 통과하고
+    // 첫 관측에서야 404가 나므로, 그때 /openai 가 두 번 들어간 사실이 보여야 한다.
+    [Fact]
+    public async Task EndpointWithAPath_ShowsTheDoubledSegment_InThe404()
+    {
+        using var http = new HttpClient(new FailingHandler(HttpStatusCode.NotFound, "{}"));
+        var client = new AzureOpenAiCompletionClient(http, new AzureOpenAiOptions(
+            "https://example.openai.azure.com/openai/v1", "gpt-4o", "2024-10-21", "key", null));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.CompleteAsync("s", "u", 100, requireJsonObject: true));
+
+        Assert.Contains("/openai/v1/openai/deployments/gpt-4o/", ex.Message);
+    }
+
+    [Fact]
+    public async Task VertexFailure_CarriesTheResponseBody()
+    {
+        const string vertex403 = """{"error":{"status":"PERMISSION_DENIED","message":"aiplatform.endpoints.predict denied"}}""";
+        using var http = new HttpClient(new FailingHandler(HttpStatusCode.Forbidden, vertex403));
+        var client = new VertexAiCompletionClient(http,
+            new VertexAiOptions("p", "us-central1", "gemini-test"), _ => Task.FromResult("t"));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.CompleteAsync("s", "u", 100, requireJsonObject: true));
+
+        Assert.Contains("PERMISSION_DENIED", ex.Message);
+        Assert.Contains("locations/us-central1/publishers/google/models/gemini-test", ex.Message);
+    }
+
+    // 공급자가 HTML 오류 페이지를 돌려주는 경우가 있다 — 통째로 실으면 로그 한 줄이 화면을 덮는다.
+    [Fact]
+    public async Task LongErrorBodies_AreTruncated()
+    {
+        using var http = new HttpClient(new FailingHandler(
+            HttpStatusCode.BadGateway, new string('x', 5000)));
+        var client = new AzureOpenAiCompletionClient(http,
+            new AzureOpenAiOptions("https://example.openai.azure.com", "d", "2024-10-21", "key", null));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.CompleteAsync("s", "u", 100, requireJsonObject: true));
+
+        Assert.True(ex.Message.Length < 600, $"길이 {ex.Message.Length}");   // 5000자를 그대로 싣지 않는다
+        Assert.EndsWith("…", ex.Message);
+    }
+
+    [Fact]
+    public async Task EmptyErrorBody_SaysSoInsteadOfTrailingColon()
+    {
+        using var http = new HttpClient(new FailingHandler(HttpStatusCode.ServiceUnavailable, ""));
+        var client = new AzureOpenAiCompletionClient(http,
+            new AzureOpenAiOptions("https://example.openai.azure.com", "d", "2024-10-21", "key", null));
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() =>
+            client.CompleteAsync("s", "u", 100, requireJsonObject: true));
+
+        Assert.Contains("응답 본문 없음", ex.Message);
     }
 }
