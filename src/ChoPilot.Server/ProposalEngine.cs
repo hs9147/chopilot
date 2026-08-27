@@ -86,7 +86,7 @@ public sealed class ProposalEngine
     }
 
     /// <summary>
-    /// 종류별 문턱 — <b>평점 평균</b>으로 움직인다.
+    /// 종류별 문턱 — <b>정확성·유용성</b>으로 움직인다. 실행 가능성은 보지 않는다.
     ///
     /// <para>
     /// 채택률이 아니라 평점을 쓰는 이유: "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔하고,
@@ -110,8 +110,32 @@ public sealed class ProposalEngine
                 continue;
             }
 
-            var mean = outcome.MeanRating!.Value;
-            var seen = $"평균 {mean:0.0}점 ({outcome.Rated}건 평가)";
+            var accuracy = outcome.MeanAccuracy!.Value;
+            var mean = outcome.MeanQuality!.Value;
+            var seen = $"정확성 {accuracy:0.0} · 유용성 {outcome.MeanUsefulness:0.0}"
+                + $" · 실행 가능성 {outcome.MeanActionability:0.0} ({outcome.Rated}건 평가)";
+
+            // 실행 가능성이 낮아도 기준은 건드리지 않는다. 못 하는 것과 틀린 것은 다르다 —
+            // 뭉치면 옳게 찾아낸 종류가 조직 사정 때문에 조용히 꺼진다.
+            if (outcome.MeanActionability < 2.0)
+                notes.Add($"{outcome.Kind}: 실행 가능성 {outcome.MeanActionability:0.0} — 낮지만 기준은 그대로 둔다"
+                    + " (고칠 곳이 생성기가 아니라 조직 쪽일 수 있다)");
+
+            // 정확성이 낮으면 문턱을 올려도 소용없다 — 없는 현상을 말하는 것 중 점수 높은 것이 남는다.
+            if (accuracy < ProposalCriteria.MinAccuracy)
+            {
+                if (rule.Enabled)
+                {
+                    rules[index] = rule with
+                    {
+                        Enabled = false,
+                        DisabledReason = $"정확성 {accuracy:0.0} < {ProposalCriteria.MinAccuracy:0.0} — 없는 현상을 말한다 ({outcome.Rated}건 평가)",
+                    };
+                    changes.Add(new CriteriaChange(outcome.Kind, "Enabled", 1, 0,
+                        $"정확성 {accuracy:0.0} — 문턱으로는 고칠 수 없어 이 종류를 끈다"));
+                }
+                continue;
+            }
 
             if (mean < 2.5 && rule.MinScore < ProposalCriteria.MaxWeight + 0.2)
             {
@@ -120,7 +144,7 @@ public sealed class ProposalEngine
                 {
                     rules[index] = rule with { MinScore = to };
                     changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
-                        $"{seen} — 문턱을 올린다"));
+                        $"품질 {mean:0.0} — {seen} — 문턱을 올린다"));
                     continue;
                 }
             }
@@ -131,21 +155,21 @@ public sealed class ProposalEngine
                 rules[index] = rule with
                 {
                     Enabled = false,
-                    DisabledReason = $"문턱 {rule.MinScore:0.00}에서도 {seen}",
+                    DisabledReason = $"문턱 {rule.MinScore:0.00}에서도 품질 {mean:0.0} — {seen}",
                 };
                 changes.Add(new CriteriaChange(outcome.Kind, "Enabled", 1, 0,
-                    $"문턱을 올려도 낮게 평가된다 — 이 종류를 끈다"));
+                    $"문턱을 올려도 품질 {mean:0.0} — 이 종류를 끈다"));
             }
             else if (mean > 3.8 && rule.MinScore > 0.2)
             {
                 var to = Math.Round(Math.Max(0.2, rule.MinScore - 0.05), 2);
                 rules[index] = rule with { MinScore = to };
                 changes.Add(new CriteriaChange(outcome.Kind, "MinScore", rule.MinScore, to,
-                    $"{seen} — 문턱을 내려 더 올린다"));
+                    $"품질 {mean:0.0} — {seen} — 문턱을 내려 더 올린다"));
             }
             else
             {
-                notes.Add($"{outcome.Kind}: {seen} — 조정 구간(2.5~3.8점) 안이라 그대로 둔다");
+                notes.Add($"{outcome.Kind}: 품질 {mean:0.0} — 조정 구간(2.5~3.8점) 안이라 그대로 둔다 · {seen}");
             }
         }
 
@@ -153,7 +177,7 @@ public sealed class ProposalEngine
     }
 
     /// <summary>
-    /// 축 가중치 — 평점과 <b>같이 움직인 축</b>을 올리고 반대로 움직인 축을 내린다.
+    /// 축 가중치 — <b>유용성</b>과 같이 움직인 축을 올리고 반대로 움직인 축을 내린다.
     ///
     /// <para>
     /// 문턱은 "얼마나 확실해야 올릴까"를 정하지만, 어느 축이 실제로 유용성을 예측하는지는
@@ -176,7 +200,9 @@ public sealed class ProposalEngine
             return criteria;
         }
 
-        var ratings = rated.Select(p => (double)p.Rating!.Value).ToList();
+        // 목표는 유용성이다. 정확성은 생성기 품질이고, 축 가중치가 정하는 것은
+        // "어떤 것이 알 가치가 있는가"이므로 그 축과 맞춰야 한다.
+        var ratings = rated.Select(p => (double)p.Rating!.Usefulness).ToList();
         var next = criteria;
 
         foreach (var (axis, get, set) in Axes())
@@ -188,7 +214,7 @@ public sealed class ProposalEngine
             var r = ProposalScoring.Correlation(values, ratings);
             if (r is null)
             {
-                notes.Add($"가중치 {axis}: 축값이나 평점이 전부 같아 상관을 말할 수 없다");
+                notes.Add($"가중치 {axis}: 축값이나 유용성이 전부 같아 상관을 말할 수 없다");
                 continue;
             }
 
@@ -211,7 +237,7 @@ public sealed class ProposalEngine
 
             next = set(next, to);
             changes.Add(new CriteriaChange("(전 종류)", $"{axis} 가중치", from, to,
-                $"평점과 상관 {r.Value:+0.00;-0.00} ({rated.Count}건) — {(r.Value > 0 ? "올린다" : "내린다")}"));
+                $"유용성과 상관 {r.Value:+0.00;-0.00} ({rated.Count}건) — {(r.Value > 0 ? "올린다" : "내린다")}"));
         }
 
         return next;

@@ -185,7 +185,7 @@ public class ProposalApiTests
         var id = first.GetProperty("proposed").EnumerateArray().First().GetProperty("id").GetString()!;
 
         await client.SendAsync(As(HttpMethod.Post, $"/v1/proposals/{Uri.EscapeDataString(id)}/decide",
-            "hong", new ProposalDecision(false, Rating: 4, Note: "근거는 맞지만 지금은 손댈 수 없다")));
+            "hong", new ProposalDecision(false, new ProposalRating(4, 4, 1), "근거는 맞지만 지금은 손댈 수 없다")));
 
         var second = await Generate(client);
         Assert.DoesNotContain(second.GetProperty("proposed").EnumerateArray(),
@@ -206,7 +206,7 @@ public class ProposalApiTests
 
         var response = await client.SendAsync(As(HttpMethod.Post,
             $"/v1/proposals/{Uri.EscapeDataString(id)}/decide", "hong",
-            new ProposalDecision(true, Rating: 5, Note: "다음 스프린트에 반영")));
+            new ProposalDecision(true, new ProposalRating(5, 5, 4), "다음 스프린트에 반영")));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
         // 두 번째 결정은 거부된다 — 결정된 제안이 되살아나면 채택률이 흔들린다.
@@ -233,12 +233,12 @@ public class ProposalApiTests
             .First().GetProperty("id").GetString()!;
 
         var response = await client.SendAsync(As(HttpMethod.Post,
-            $"/v1/proposals/{Uri.EscapeDataString(id)}/decide", "hong", new ProposalDecision(true, Rating: 9)));
+            $"/v1/proposals/{Uri.EscapeDataString(id)}/decide", "hong", new ProposalDecision(true, new ProposalRating(9, 3, 3))));
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
 
         // 거부됐으니 아직 결정되지 않았고, 그래서 제대로 된 평가를 다시 낼 수 있다.
         var retry = await client.SendAsync(As(HttpMethod.Post,
-            $"/v1/proposals/{Uri.EscapeDataString(id)}/decide", "hong", new ProposalDecision(true, Rating: 4)));
+            $"/v1/proposals/{Uri.EscapeDataString(id)}/decide", "hong", new ProposalDecision(true, new ProposalRating(4, 4, 4))));
         Assert.Equal(HttpStatusCode.OK, retry.StatusCode);
     }
 
@@ -254,25 +254,35 @@ public class ProposalApiTests
             .First().GetProperty("id").GetString()!;
 
         await client.SendAsync(As(HttpMethod.Post, $"/v1/proposals/{Uri.EscapeDataString(id)}/decide",
-            "hong", new ProposalDecision(false, Rating: 5, Note: "이번 분기엔 손댈 수 없다")));
+            "hong", new ProposalDecision(false, new ProposalRating(5, 5, 0), "이번 분기엔 손댈 수 없다")));
 
         var listed = await client.GetFromJsonAsync<JsonElement>("/v1/proposals");
         var decided = listed.GetProperty("items").EnumerateArray()
             .Single(p => p.GetProperty("id").GetString() == id);
 
         Assert.Equal("rejected", decided.GetProperty("status").GetString());
-        Assert.Equal(5, decided.GetProperty("rating").GetInt32());
+        var rating = decided.GetProperty("rating");
+        Assert.Equal(5, rating.GetProperty("accuracy").GetInt32());
+        Assert.Equal(0, rating.GetProperty("actionability").GetInt32());   // 0부터 시작 — 완전한 부정
 
         // 기준을 고치는 숫자는 평점 쪽이다.
         var kind = decided.GetProperty("kind").GetString();
         var outcome = listed.GetProperty("outcomes").EnumerateArray()
             .Single(o => o.GetProperty("kind").GetString() == kind);
         Assert.Equal(0, outcome.GetProperty("acceptanceRate").GetDouble());
-        Assert.Equal(5, outcome.GetProperty("meanRating").GetDouble());
+        Assert.Equal(5, outcome.GetProperty("meanUsefulness").GetDouble());
+        // 실행 가능성이 0이어도 품질은 5다 — 못 하는 것과 틀린 것은 다르다.
+        Assert.Equal(0, outcome.GetProperty("meanActionability").GetDouble());
+        Assert.Equal(5, outcome.GetProperty("meanQuality").GetDouble());
     }
 
+    // 겹친 생성이 같은 제안을 두 번 만들면 안 된다.
+    //
+    // 상태 코드의 분포로 단언하지 않는다 — 생성은 I/O가 없어 빠르므로 세 요청이 실제로 겹칠지는
+    // 실행 순간에 달렸고, 그걸 단언하면 붙었다 떨어졌다 하는 시험이 된다. 409 계약 자체는
+    // SingleFlightApiTests가 막는 게이트로 결정적으로 검증한다. 여기서 지킬 것은 결과의 성질이다.
     [Fact]
-    public async Task ConcurrentGeneration_IsRefused()
+    public async Task ConcurrentGeneration_NeverDuplicatesAProposal()
     {
         using var server = new WebApplicationFactory<Program>();
         var client = server.CreateClient();
@@ -282,8 +292,17 @@ public class ProposalApiTests
             Enumerable.Range(0, 3).Select(_ =>
                 client.SendAsync(As(HttpMethod.Post, "/v1/proposals/generate", "ops"))));
 
-        Assert.Equal(1, results.Count(r => r.StatusCode == HttpStatusCode.OK));
-        Assert.Equal(2, results.Count(r => r.StatusCode == HttpStatusCode.Conflict));
+        Assert.All(results, r =>
+            Assert.True(r.StatusCode is HttpStatusCode.OK or HttpStatusCode.Conflict,
+                $"기대: 200 또는 409, 실제: {(int)r.StatusCode}"));
+        Assert.Contains(results, r => r.StatusCode == HttpStatusCode.OK);
+
+        var listed = await client.GetFromJsonAsync<JsonElement>("/v1/proposals");
+        var ids = listed.GetProperty("items").EnumerateArray()
+            .Select(p => p.GetProperty("id").GetString()).ToList();
+
+        Assert.NotEmpty(ids);
+        Assert.Equal(ids.Count, ids.Distinct(StringComparer.Ordinal).Count());
     }
 }
 
@@ -294,6 +313,10 @@ public class ProposalTuningTests
 {
     private static readonly DateTimeOffset Now = new(2026, 8, 26, 0, 0, 0, TimeSpan.Zero);
 
+    private static IEnumerable<ProposalRating> Ratings(
+        int count, int accuracy, int usefulness, int actionability = 3) =>
+        Enumerable.Repeat(new ProposalRating(accuracy, usefulness, actionability), count);
+
     private static ProposalEngine Engine(ProposalStore store) => new(
         store, new ObservationStore(), new UepStore(),
         new FoundationReconciler(new EntityStore(), new FoundationStore(Array.Empty<IFoundationSource>())),
@@ -301,7 +324,7 @@ public class ProposalTuningTests
 
     /// <summary>평가가 달린 결정을 심는다. 축값을 함께 넣어야 가중치 학습도 재현된다.</summary>
     private static void SeedRatings(
-        ProposalStore store, string kind, IEnumerable<int> ratings,
+        ProposalStore store, string kind, IEnumerable<ProposalRating> ratings,
         Func<int, double>? evidenceAxis = null)
     {
         var criteria = store.Current(Now);
@@ -332,7 +355,7 @@ public class ProposalTuningTests
     public void ThinEvidence_LeavesTheCriteriaAlone_AndSaysSo()
     {
         var store = new ProposalStore();
-        SeedRatings(store, ProposalKind.Rework, new[] { 1, 1, 2 });
+        SeedRatings(store, ProposalKind.Rework, Ratings(3, accuracy: 4, usefulness: 1));
 
         var result = Engine(store).Tune();
 
@@ -347,13 +370,13 @@ public class ProposalTuningTests
     {
         var store = new ProposalStore();
         var before = store.Current(Now).RuleFor(ProposalKind.MasterGap)!.MinScore;
-        SeedRatings(store, ProposalKind.MasterGap, new[] { 5, 5, 4, 5, 4, 5 });   // 전부 기각으로 심긴다
+        SeedRatings(store, ProposalKind.MasterGap, Ratings(6, accuracy: 5, usefulness: 5));   // 전부 기각으로 심긴다
 
         var result = Engine(store).Tune();
 
         Assert.True(result.Changed);
         Assert.True(store.Current(Now).RuleFor(ProposalKind.MasterGap)!.MinScore < before);
-        Assert.Contains(result.Changes, c => c.Reason.Contains("평균"));
+        Assert.Contains(result.Changes, c => c.Reason.Contains("품질"));
     }
 
     [Fact]
@@ -361,7 +384,7 @@ public class ProposalTuningTests
     {
         var store = new ProposalStore();
         var before = store.Current(Now).RuleFor(ProposalKind.Rework)!.MinScore;
-        SeedRatings(store, ProposalKind.Rework, new[] { 1, 2, 1, 2, 1, 2 });
+        SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 4, usefulness: 0));   // 품질 2.0
 
         var result = Engine(store).Tune();
 
@@ -370,7 +393,7 @@ public class ProposalTuningTests
 
         var after = store.Current(Now);
         Assert.True(after.RuleFor(ProposalKind.Rework)!.MinScore > before);
-        Assert.Contains("평균", after.Rationale);
+        Assert.Contains("품질", after.Rationale);
         Assert.Equal(2, store.CriteriaHistory().Count);   // 덮이지 않고 쌓인다
     }
 
@@ -396,6 +419,42 @@ public class ProposalTuningTests
         Assert.Contains(result.Notes, n => n.Contains("rework") && n.Contains("평가 0건"));
     }
 
+    // 정확성이 낮으면 문턱을 올려도 소용없다 — 없는 현상을 말하는 것 중 점수 높은 것이 남는다.
+    // 한 숫자로 뭉쳐 있었다면 문턱만 한 칸 올리고 끝났을 자리다.
+    [Fact]
+    public void LowAccuracy_TurnsTheKindOffAtOnce_WithoutClimbingTheThreshold()
+    {
+        var store = new ProposalStore();
+        var before = store.Current(Now).RuleFor(ProposalKind.Rework)!.MinScore;
+        SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 1, usefulness: 4));
+
+        var result = Engine(store).Tune();
+
+        var rule = store.Current(Now).RuleFor(ProposalKind.Rework)!;
+        Assert.False(rule.Enabled);
+        Assert.Contains("없는 현상을 말한다", rule.DisabledReason);
+        Assert.Equal(before, rule.MinScore);   // 문턱을 올리는 우회로를 거치지 않는다
+        Assert.Contains(result.Changes, c => c.Reason.Contains("정확성"));
+    }
+
+    // 못 하는 것과 틀린 것은 다르다. 실행 가능성이 0이어도 옳게 찾아낸 종류를 벌하지 않는다.
+    [Fact]
+    public void LowActionability_DoesNotMoveTheCriteria_ButIsReported()
+    {
+        var store = new ProposalStore();
+        var before = store.Current(Now).RuleFor(ProposalKind.MasterGap)!;
+        SeedRatings(store, ProposalKind.MasterGap,
+            Ratings(6, accuracy: 5, usefulness: 5, actionability: 0));
+
+        var result = Engine(store).Tune();
+        var after = store.Current(Now).RuleFor(ProposalKind.MasterGap)!;
+
+        Assert.True(after.Enabled);                       // 꺼지지 않는다
+        Assert.True(after.MinScore < before.MinScore);    // 오히려 품질이 높아 문턱이 내려간다
+        Assert.Contains(result.Notes,
+            n => n.Contains("실행 가능성") && n.Contains("조직 쪽일 수 있다"));
+    }
+
     // 문턱을 끝까지 올렸는데도 낮게 평가된다면 점수가 아니라 종류가 틀렸다.
     [Fact]
     public void WhenRaisingTheBarStopsHelping_TheKindIsTurnedOffWithAReason()
@@ -405,13 +464,13 @@ public class ProposalTuningTests
 
         for (var round = 0; round < 8; round++)
         {
-            SeedRatings(store, ProposalKind.Rework, Enumerable.Repeat(1, 6));
+            SeedRatings(store, ProposalKind.Rework, Ratings(6, accuracy: 4, usefulness: 0));
             engine.Tune();
         }
 
         var rule = store.Current(Now).RuleFor(ProposalKind.Rework)!;
         Assert.False(rule.Enabled);
-        Assert.Contains("평균", rule.DisabledReason);   // 이유 없이 꺼진 규칙은 되살릴 근거도 없다
+        Assert.Contains("품질", rule.DisabledReason);   // 이유 없이 꺼진 규칙은 되살릴 근거도 없다
     }
 
     // 조정 구간 안이면 흔들지 않는다 — 매번 움직이면 기준이 잡음을 따라간다.
@@ -420,7 +479,7 @@ public class ProposalTuningTests
     {
         var store = new ProposalStore();
         var before = store.Current(Now).RuleFor(ProposalKind.ScreenSplit)!.MinScore;
-        SeedRatings(store, ProposalKind.ScreenSplit, new[] { 3, 3, 4, 3, 3, 3 });
+        SeedRatings(store, ProposalKind.ScreenSplit, Ratings(6, accuracy: 4, usefulness: 3));
 
         var result = Engine(store).Tune();
 
@@ -449,7 +508,7 @@ public class ProposalWeightTuningTests
         for (var i = 0; i < count; i++)
         {
             var axis = i / (double)(count - 1);                  // 0 → 1
-            var rating = positive ? 1 + (int)(axis * 4) : 5 - (int)(axis * 4);
+            var usefulness = positive ? (int)(axis * 5) : 5 - (int)(axis * 5);
             var id = $"{ProposalKind.ScreenSplit}:c{i}";
             store.Put(new Proposal(id, ProposalKind.ScreenSplit, "t", "b",
                 new ProposalEvidence(9, 3, Now, Now, Array.Empty<string>()),
@@ -461,7 +520,8 @@ public class ProposalWeightTuningTests
                     new ScoreDimension("영향", 0.5, criteria.ImpactWeight, ""),
                 }),
                 ProposalStatus.Proposed, Now, criteria.Version));
-            store.Decide(id, ProposalStatus.Accepted, "hong", rating, null, Now);
+            store.Decide(id, ProposalStatus.Accepted, "hong",
+                new ProposalRating(4, usefulness, 3), null, Now);
         }
     }
 

@@ -769,11 +769,11 @@ app.MapPost("/v1/proposals/{id}/decide",
     if (RequestUser.Require(request, out var actor) is { } unauthenticated)
         return unauthenticated;
 
-    // 범위를 벗어난 평점을 조용히 잘라 넣으면 학습이 없는 값으로 돌아간다.
-    if (body.Rating is { } rating && !Proposal.IsValidRating(rating))
+    // 범위를 벗어난 평가를 조용히 잘라 넣으면 학습이 없는 값으로 돌아간다.
+    if (body.Rating?.Invalid() is { } bad)
         return Results.BadRequest(new
         {
-            error = $"평가는 {Proposal.MinRating}~{Proposal.MaxRating} 사이여야 한다 (받은 값: {rating})",
+            error = $"{bad}은(는) {ProposalRating.Min}~{ProposalRating.Max} 사이여야 한다",
         });
 
     var status = body.Accept ? ProposalStatus.Accepted : ProposalStatus.Rejected;
@@ -783,7 +783,9 @@ app.MapPost("/v1/proposals/{id}/decide",
 
     decisions.Record($"proposal_{status}", actor, decided.Id, decided.Kind, decided.Score.Total,
         $"{decided.Title}"
-        + (decided.Rating is { } r ? $" — 평가 {r}/{Proposal.MaxRating}" : " — 평가 없음(기준 학습에 쓰이지 않는다)")
+        + (decided.Rating is { } r
+            ? $" — 정확성 {r.Accuracy}/{ProposalRating.Max} · 유용성 {r.Usefulness} · 실행 가능성 {r.Actionability}"
+            : " — 평가 없음(기준 학습에 쓰이지 않는다)")
         + (string.IsNullOrWhiteSpace(body.Note) ? "" : $" · {body.Note}"));
 
     return Results.Ok(decided);

@@ -515,7 +515,8 @@ function renderProposalCriteria() {
     // 기준을 고치는 건 평점이다. 채택률은 참고로만 보여준다 —
     // "근거는 맞지만 지금 손댈 수 없다"는 기각이 흔해서 유용성과 어긋난다.
     const rating = o && o.rated > 0
-      ? `${o.meanRating.toFixed(1)} <span class="hint">(${o.rated}건)</span>`
+      ? `${o.meanAccuracy.toFixed(1)} / ${o.meanUsefulness.toFixed(1)} / ${o.meanActionability.toFixed(1)}`
+        + ` <span class="hint">(${o.rated}건)</span>`
       : `<span class="hint">평가 없음</span>`;
     const rate = o && o.decided > 0
       ? `<span class="hint">${pct(o.acceptanceRate)}</span>`
@@ -543,10 +544,32 @@ function renderProposalCriteria() {
       <thead><tr>
         <th>종류</th><th>상태</th><th class="num">최소 관측</th><th class="num">최소 인원</th>
         <th class="num">최소 점수</th><th class="num">제안</th>
-        <th class="num">평균 평가</th><th class="num">채택률<br><span class="hint">참고</span></th>
+        <th class="num">평균 평가<br><span class="hint">정확성/유용성/실행</span></th><th class="num">채택률<br><span class="hint">참고</span></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
+}
+
+// 평가 축 셋. 한 숫자로 뭉치면 "틀렸다"와 "못 한다"가 같은 값이 되고,
+// 그러면 옳게 찾아낸 종류가 조직 사정 때문에 꺼진다.
+const RATING_AXES = [
+  ['accuracy', '정확성', '이런 현상이 실제로 있나'],
+  ['usefulness', '유용성', '알 가치가 있나'],
+  ['actionability', '실행 가능성', '우리가 할 수 있나 (기준을 움직이지 않는다)'],
+];
+
+function ratingAxes(i) {
+  const options = [0, 1, 2, 3, 4, 5]
+    .map((n) => `<option value="${n}"${n === 3 ? ' selected' : ''}>${n}</option>`).join('');
+  return `<span class="rating-group">
+    ${RATING_AXES.map(([key, label, help]) => `
+      <label class="rating" title="${esc(help)}">${label}
+        <select class="text" data-rating="${i}" data-axis="${key}">${options}</select>
+      </label>`).join('')}
+    <label class="rating" title="세 축 모두 비우고 결정한다 — 그 건은 기준 학습에 쓰이지 않는다">
+      <input type="checkbox" data-skip="${i}"> 평가 안 함
+    </label>
+  </span>`;
 }
 
 function renderProposals() {
@@ -578,20 +601,13 @@ function renderProposals() {
             ? `<span class="badge ${p.status === 'accepted' ? 'badge-mask' : 'badge-leak'}">
                  ${p.status === 'accepted' ? '채택' : '기각'}</span>
                ${p.rating
-                 ? `<span class="badge">평가 ${p.rating}/5</span>`
+                 ? `<span class="badge">정확성 ${p.rating.accuracy}</span>
+                    <span class="badge">유용성 ${p.rating.usefulness}</span>
+                    <span class="badge">실행 ${p.rating.actionability}</span>`
                  : '<span class="badge">평가 없음</span>'}
                <span class="hint">${esc(p.decidedBy || '')} ${esc((p.decidedAt || '').slice(0, 16).replace('T', ' '))}</span>`
             : `<span class="hint">점수 ${p.score.total.toFixed(2)} · 기준 v${p.criteriaVersion}</span>
-               <label class="rating">유용함
-                 <select class="text" data-rating="${i}">
-                   <option value="">평가 안 함</option>
-                   <option value="1">1 — 쓸모없다</option>
-                   <option value="2">2</option>
-                   <option value="3" selected>3 — 보통</option>
-                   <option value="4">4</option>
-                   <option value="5">5 — 매우 유용</option>
-                 </select>
-               </label>
+               ${ratingAxes(i)}
                <button class="btn btn-sm btn-primary" data-accept="${i}">채택</button>
                <button class="btn btn-sm btn-ghost" data-reject="${i}">기각</button>`}
         </div>
@@ -607,10 +623,16 @@ function renderProposals() {
     </div>`;
   }).join('');
 
-  // 평가는 그 제안 카드 안의 select에서 읽는다 — 카드마다 다른 값이라 인덱스로 짚는다.
+  // 평가는 그 제안 카드 안의 select들에서 읽는다 — 카드마다 다른 값이라 인덱스로 짚는다.
   const ratingOf = (i) => {
-    const v = box.querySelector(`[data-rating="${i}"]`)?.value;
-    return v ? Number(v) : null;
+    if (box.querySelector(`[data-skip="${i}"]`)?.checked) return null;
+    const rating = {};
+    for (const [key] of RATING_AXES) {
+      const el = box.querySelector(`[data-rating="${i}"][data-axis="${key}"]`);
+      if (!el) return null;
+      rating[key] = Number(el.value);
+    }
+    return rating;
   };
 
   box.querySelectorAll('[data-accept]').forEach((b) =>
@@ -682,7 +704,8 @@ async function decideProposal(proposal, accept, rating, button) {
       // 채택 여부가 아니라 평가가 기준을 고친다 — 평가를 비웠으면 그렇다고 말해 준다.
       msg.textContent = `${accept ? '채택' : '기각'}됨 — `
         + (rating
-          ? `평가 ${rating}/5가 기준 학습에 들어간다.`
+          ? `정확성 ${rating.accuracy} · 유용성 ${rating.usefulness} · 실행 가능성 ${rating.actionability}`
+            + ' 가 기준 학습에 들어간다 (실행 가능성은 기준을 움직이지 않는다).'
           : '평가를 매기지 않아 기준 학습에는 쓰이지 않는다.');
       await refreshAll();
     } catch (err) {

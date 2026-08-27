@@ -34,6 +34,45 @@ public static class ProposalStatus
 }
 
 /// <summary>
+/// 사용자 평가. 한 숫자로 뭉치지 않는 이유는 <b>세 축이 서로 다른 결정을 이끌기 때문</b>이다.
+///
+/// <list type="bullet">
+///   <item><see cref="Accuracy"/>가 낮다 = 생성기가 <b>없는 현상을 말한다</b>. 문턱을 올려도
+///     소용없다 — 틀린 것 중 점수 높은 것이 남을 뿐이다. 그 종류를 꺼야 한다.</item>
+///   <item><see cref="Usefulness"/>가 낮다 = 사실이지만 알 가치가 없다. 문턱을 올려 걸러낸다.</item>
+///   <item><see cref="Actionability"/>가 낮다 = 맞고 유용하지만 우리가 못 한다.
+///     <b>기준을 움직이지 않는다</b> — 조직 사정이지 생성기 품질이 아니다.
+///     이걸 유용성과 뭉치면 옳게 찾아낸 종류가 조용히 꺼진다.</item>
+/// </list>
+///
+/// <para>
+/// 척도는 <b>0부터</b>다. 0은 "전혀 아니다"이고 1과 다른 판단이다 —
+/// 1부터 시작하면 완전한 부정을 표현할 칸이 없어 최저점이 두 뜻을 겸한다.
+/// </para>
+/// </summary>
+public sealed record ProposalRating(int Accuracy, int Usefulness, int Actionability)
+{
+    public const int Min = 0;
+    public const int Max = 5;
+
+    /// <summary>
+    /// 문턱을 움직이는 합성 점수. <b>실행 가능성은 빠진다</b> — 못 하는 것과 틀린 것은 다르다.
+    /// </summary>
+    public double Quality => (Accuracy + Usefulness) / 2.0;
+
+    public static bool IsValid(int value) => value is >= Min and <= Max;
+
+    /// <summary>범위를 벗어난 축의 이름. 전부 정상이면 null.</summary>
+    public string? Invalid()
+    {
+        if (!IsValid(Accuracy)) return "정확성";
+        if (!IsValid(Usefulness)) return "유용성";
+        if (!IsValid(Actionability)) return "실행 가능성";
+        return null;
+    }
+}
+
+/// <summary>
 /// 제안 1건의 근거. <b>제안은 근거 없이 존재할 수 없다</b> —
 /// 근거를 붙이지 않으면 읽는 사람이 검증할 수 없고, 그건 제안이 아니라 주장이다.
 /// </summary>
@@ -81,6 +120,12 @@ public sealed record ProposalCriteria(
 {
     /// <summary>종류별 문턱을 고치는 데 필요한 최소 평가 수. 이보다 적으면 건드리지 않는다.</summary>
     public const int MinRatingsToTune = 5;
+
+    /// <summary>
+    /// 이 아래로 정확성 평균이 떨어지면 그 종류를 끈다. 문턱을 올려도 소용없다 —
+    /// <b>없는 현상을 말하는 것 중 점수 높은 것</b>이 남을 뿐이다.
+    /// </summary>
+    public const double MinAccuracy = 2.0;
 
     /// <summary>
     /// 축 가중치를 고치는 데 필요한 최소 평가 수. 문턱보다 높게 잡는다 —
@@ -146,17 +191,11 @@ public sealed record Proposal(
     string? DecisionNote = null,
 
     /// <summary>
-    /// 사용자 평가 1~5. <b>채택 여부와 별개다</b> — 근거는 맞지만 지금 손댈 수 없어 기각하는 일이
+    /// 사용자 평가. <b>채택 여부와 별개다</b> — 근거는 맞지만 지금 손댈 수 없어 기각하는 일이
     /// 흔하고, 그걸 "쓸모없음"으로 세면 옳게 찾아낸 종류의 문턱이 올라간다.
     /// 기준을 고치는 유일한 입력이라 평가가 없으면 그 결정은 학습에 쓰이지 않는다.
     /// </summary>
-    int? Rating = null)
-{
-    public const int MinRating = 1;
-    public const int MaxRating = 5;
-
-    public static bool IsValidRating(int rating) => rating is >= MinRating and <= MaxRating;
-}
+    ProposalRating? Rating = null);
 
 /// <summary>
 /// 게이트에서 떨어진 후보와 그 이유. <b>버린 것을 말하지 않으면 "이게 전부"로 읽힌다</b> —

@@ -7,11 +7,12 @@ namespace ChoPilot.Server;
 /// 제안 결정 요청. 사유는 선택이지만 <b>다음 자체 평가의 유일한 질적 입력</b>이라
 /// 기각할 때는 적어 두는 편이 낫다 — 숫자만으로는 왜 기각됐는지 되짚을 수 없다.
 /// </summary>
-public sealed record ProposalDecision(bool Accept, int? Rating = null, string? Note = null);
+public sealed record ProposalDecision(bool Accept, ProposalRating? Rating = null, string? Note = null);
 
-/// <summary>종류별 성적. <see cref="MeanRating"/>이 기준을 고치는 입력이다.</summary>
+/// <summary>종류별 성적. <see cref="MeanQuality"/>가 문턱을, <see cref="MeanAccuracy"/>가 존폐를 정한다.</summary>
 public sealed record KindOutcome(
-    string Kind, int Proposed, int Accepted, int Rejected, int Rated, double? MeanRating)
+    string Kind, int Proposed, int Accepted, int Rejected, int Rated,
+    double? MeanAccuracy, double? MeanUsefulness, double? MeanActionability, double? MeanQuality)
 {
     public int Decided => Accepted + Rejected;
 
@@ -98,7 +99,7 @@ public sealed class ProposalStore
     }
 
     public Proposal? Decide(
-        string id, string status, string actor, int? rating, string? note, DateTimeOffset at)
+        string id, string status, string actor, ProposalRating? rating, string? note, DateTimeOffset at)
     {
         var existing = _proposals.GetValueOrDefault(id);
         if (existing is null || existing.Status != ProposalStatus.Proposed) return null;
@@ -132,14 +133,22 @@ public sealed class ProposalStore
             .Select(kind =>
             {
                 var mine = _proposals.Values.Where(p => p.Kind == kind).ToList();
-                var ratings = mine.Where(p => p.Rating is not null).Select(p => (double)p.Rating!.Value).ToList();
+                var rated = mine.Where(p => p.Rating is not null).Select(p => p.Rating!).ToList();
+                double? Mean(Func<ProposalRating, double> pick) =>
+                    rated.Count == 0 ? null : Math.Round(rated.Average(pick), 2);
+
                 return new KindOutcome(
                     kind,
                     Proposed: mine.Count,
                     Accepted: mine.Count(p => p.Status == ProposalStatus.Accepted),
                     Rejected: mine.Count(p => p.Status == ProposalStatus.Rejected),
-                    Rated: ratings.Count,
-                    MeanRating: ratings.Count == 0 ? null : Math.Round(ratings.Average(), 2));
+                    Rated: rated.Count,
+                    MeanAccuracy: Mean(r => r.Accuracy),
+                    MeanUsefulness: Mean(r => r.Usefulness),
+                    // 실행 가능성은 기준을 움직이지 않는다. 그래도 보여준다 —
+                    // 계속 낮으면 고칠 곳이 생성기가 아니라 조직 쪽이라는 신호다.
+                    MeanActionability: Mean(r => r.Actionability),
+                    MeanQuality: Mean(r => r.Quality));
             })
             .ToList();
 }
