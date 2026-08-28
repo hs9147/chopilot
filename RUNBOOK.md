@@ -398,7 +398,21 @@ dotnet --version    # 8.x 가 나오면 건너뛴다
 iwr https://dot.net/v1/dotnet-install.ps1 -OutFile $env:TEMP\dotnet-install.ps1
 & $env:TEMP\dotnet-install.ps1 -Channel 8.0 -InstallDir $env:LOCALAPPDATA\Microsoft\dotnet
 $env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
+
+# 이 두 줄을 빠뜨리면 chopilot-dump.exe 가 런타임을 못 찾는다 (아래 설명)
+$env:DOTNET_ROOT = "$env:LOCALAPPDATA\Microsoft\dotnet"
+setx DOTNET_ROOT "$env:LOCALAPPDATA\Microsoft\dotnet"
 ```
+
+> **`DOTNET_ROOT`를 왜 굳이 박는가.** 비표준 위치 설치는 `dotnet run`만 고친다.
+> `dotnet.exe`는 .NET 설치 폴더 **안에** 있어서 자기 옆에서 `hostfxr.dll`을 찾지만,
+> `chopilot-dump.exe`는 남의 폴더에 있는 apphost라 밖에서 찾아야 한다 —
+> `DOTNET_ROOT` → 레지스트리 `HKLM\SOFTWARE\dotnet\Setup\InstalledVersions\x64` →
+> `C:\Program Files\dotnet` 순서다. 사용자 로컬 설치는 셋 다 비므로
+> **`dotnet run`은 되는데 exe만 `hostfxr.dll not found`로 죽는다.**
+> `setx`는 다음에 여는 창부터 적용된다 — `.cmd` 더블클릭도 그때부터 산다.
+>
+> 아예 이 탐색을 없애려면 ⑤의 self-contained 배포를 쓴다. VDI 배포는 그쪽이 기본이다.
 
 ### ② 빌드
 
@@ -443,11 +457,17 @@ notepad src\ChoPilot.Client\appsettings.local.json
 
 ### ⑤ 관측 — 원클릭
 
-탐색기에서 빌드 산출물 폴더를 열고 **`chopilot-watch.cmd` 를 더블클릭**한다.
+관측기를 한 폴더에 모은다. **VDI에서는 `--self-contained`를 쓴다:**
 
+```powershell
+dotnet publish src\ChoPilot.Client -c Release -r win-x64 --self-contained -o C:\ChoPilot
 ```
-src\ChoPilot.Client\bin\Release\net8.0\chopilot-watch.cmd
-```
+
+런타임이 폴더 안에 통째로 들어가 `hostfxr.dll`이 exe 옆에 생긴다 → ①의 탐색 순서를
+아예 거치지 않는다. 폴더가 200MB쯤 되지만, .NET 설치 상태가 PC마다 다른 사내 VDI에서
+유일하게 안 막히는 길이다. **폴더째** 옮겨야 한다 — exe 하나만 떼면 같은 오류가 난다.
+
+이제 탐색기에서 **`C:\ChoPilot\chopilot-watch.cmd` 를 더블클릭**한다.
 
 5초 뒤부터 10초 간격으로 포그라운드 창을 관측한다. **그 5초 안에 Procurement 화면을 앞으로
 두면 된다.** 화면이 그대로면 보내지 않는다. 중단은 Ctrl+C 또는 창 닫기.
@@ -456,6 +476,13 @@ src\ChoPilot.Client\bin\Release\net8.0\chopilot-watch.cmd
 
 ```powershell
 $env:CHOPILOT_WATCH_SECONDS = "30"
+```
+
+개발 중이라 매번 배포하기 번거로우면 빌드 산출물 폴더에서 바로 실행해도 된다 —
+①의 `DOTNET_ROOT`가 잡혀 있어야 한다:
+
+```
+src\ChoPilot.Client\bin\Release\net8.0\chopilot-watch.cmd
 ```
 
 ### ⑥ 관측 — 명령줄
@@ -471,12 +498,11 @@ dotnet run --project src\ChoPilot.Client -- --watch --upload
 dotnet run --project src\ChoPilot.Client -- --delay 3 --completed --upload
 ```
 
-배포용으로 한 폴더에 모으려면:
+⑤로 배포한 폴더에서는 `dotnet` 없이 exe를 직접 부른다:
 
 ```powershell
-dotnet publish src\ChoPilot.Client -c Release -o C:\ChoPilot
-C:\ChoPilot\chopilot-watch.cmd        # 원클릭
 C:\ChoPilot\chopilot-dump.exe --watch --upload
+C:\ChoPilot\chopilot-dump.exe --delay 3 --completed --upload
 ```
 
 ### ⑦ 확인
@@ -484,7 +510,7 @@ C:\ChoPilot\chopilot-dump.exe --watch --upload
 브라우저에서 `http://localhost:5080` 을 열고 ② 지표가 올라가는지 본다.
 상단 배지 두 개(`인증 없음` / `인메모리` 여부)로 지금 어떤 모드인지 항상 알 수 있다.
 
-관측이 안 잡히면 §8 트러블슈팅의 "트리에 값이 거의 안 잡힘" 항목부터 본다.
+관측이 안 잡히면 §9 "자주 걸리는 것"의 "트리에 값이 거의 안 잡힘" 항목부터 본다.
 
 ---
 
@@ -684,7 +710,10 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 | 관측 POST가 400 | 계약 위반이다. 응답 `detail`에 사유가 있다(`tree.children 없음`, `privacy.maskedRefs 없음` 등) |
 | 스풀에 `*.bad`가 쌓임 | 서버가 영구 거부(4xx)한 이벤트다. `detail`을 보고 클라이언트를 고쳐라 |
 | 트리에 값이 거의 안 잡힘 | 브라우저 접근성 트리 미노출. 대상 창을 **실제 포그라운드**로 두어라. Chrome은 자동 활성이지만 안 되면 `--force-renderer-accessibility`로 실행 |
-| `chopilot-watch.cmd` 더블클릭 시 창이 바로 닫힘 | `chopilot-dump.exe`가 옆에 없다. `dotnet build` 산출물 폴더(`bin\...\net8.0\`)에서 실행하거나 `dotnet publish -o` 로 한 폴더에 모아라 |
+| `chopilot-watch.cmd` 더블클릭 시 창이 바로 닫힘 | `chopilot-dump.exe`가 옆에 없다. `dotnet build` 산출물 폴더(`bin\...\net8.0\`)에서 실행하거나 §5 ⑤로 한 폴더에 모아라 |
+| **`hostfxr.dll not found`** (`dotnet run`은 되는데 exe만 실패) | apphost가 .NET 설치 위치를 못 찾는다. `dotnet.exe`는 자기 옆에서 찾고 exe는 밖에서 찾기 때문이다. `setx DOTNET_ROOT "<dotnet --info 의 Base Path 상위>"` 후 **새 창**에서 실행. 근본 해결은 §5 ⑤ self-contained 배포 |
+| `hostfxr.dll not found` (`dotnet`도 없음) | .NET 자체가 없다. **Desktop Runtime**을 깔아야 한다 — `FlaUI.Core`가 `Microsoft.WindowsDesktop.App.WindowsForms`를 요구하므로 일반 런타임만으로는 다음 단계에서 또 막힌다 |
+| `Microsoft.WindowsDesktop.App was not found` | 위와 같다. 일반 런타임만 깔린 상태 — Desktop Runtime 8.0 (x64) |
 | Windows에서 `dotnet build` 실패 (NETSDK1073 등) | Linux/macOS에서 솔루션 전체를 빌드하려 한 것이다. 클라이언트는 `net8.0-windows`라 Windows에서만 빌드된다 |
 | `--watch`가 계속 "변화 없음"만 찍음 | 정상이다 — 화면이 그대로면 보내지 않는다. 강제로 보내려면 `--resend-unchanged` |
 | 적재가 429로 밀림 | `Limits:IngestionPerMinute`(기본 120) 초과. 유실은 아니고 스풀에 남는다 — 간격을 늘리거나 상한을 올려라 |
@@ -695,7 +724,85 @@ curl -s $H/v1/ontology                                # 버전 +1, 개념 9개
 
 ---
 
-## 10. 지금 검증되지 않은 것
+## 10. 실측 창 — Phase 0 관문 통과 절차
+
+§11이 "실행해 보지 못한 것"을 나열한다. 이 장은 **그것을 닫는 절차**다.
+로드맵(ARCHITECTURE §10)이 Phase 0에 세운 가정은 하나다 —
+*"UIA로 안 읽히거나 AI 동적매핑이 성립 안 하면 이 제품은 무의미하다."*
+그 가정에 아직 숫자가 없다. 서버 쪽은 이미 그 위에 높이 쌓였으므로, **더 쌓기 전에 잰다.**
+
+측정 도구는 새로 만들 것이 없다. 콘솔 ②(지표)·⑦(AI 판단)·추정 이력이 그대로 채점 도구다.
+
+### 10.1 시작 전 (Day 1)
+
+세 가지가 갖춰져야 축적이 의미를 갖는다.
+
+| | 확인 | 안 하면 |
+|---|---|---|
+| 영속화 | 상단 배지가 `인메모리`가 **아니어야** 한다 (§2.2) | 재시작 한 번에 2주가 사라진다 |
+| LLM 실호출 | 상단 배지가 `LLM 스텁`이 **아니어야** 한다 (§2.5) | 미스가 AI로 가지 않아 H3를 잴 수 없다 |
+| 측정자 ID | 사람마다 다른 값 (§4.3) | 개인화·k-인원 게이트가 전부 한 사람으로 접힌다 |
+
+동시에 걸어 둘 것(코드가 아니라 협의라 리드타임이 길다): Graph API 접근 권한,
+화면·필드 명세 문서, 사내 표준 브라우저 확인 (ARCHITECTURE §11).
+
+### 10.2 조기 게이트 (Day 2) — 여기서 멈출 수도 있다
+
+H1의 치명 신호는 2주가 아니라 **이틀이면 나온다.** 트리에 값이 잡히는지는 첫 회차에 보인다.
+
+핵심 화면 3개(예: 구매요청 등록 / 목록 / 상세)를 각각 한 번씩 `--delay 5`로 찍고,
+콘솔 ⑦에서 **필드에 라벨과 값이 함께 보이는지** 센다.
+
+- **3개 중 2개 이상** → 진행. 나머지 한 개는 개별 문제로 따로 다룬다.
+- **2개 미만** → **축적을 멈추고** 접근성 트리 노출과 먼저 싸운다
+  (§9의 "트리에 값이 거의 안 잡힘", Chrome `--force-renderer-accessibility`).
+  이 상태로 2주를 모으면 빈 트리 2주가 쌓인다.
+
+> 기준을 숫자로 박아 두는 이유: "일부는 읽히는데 일부는 안 읽힌다"가 가장 흔한 결과이고,
+> 그때 판단이 흔들리면 게이트가 장식이 된다.
+
+### 10.3 축적 (Week 1–2)
+
+`chopilot-watch.cmd` 상시 + 저장 직후 `--completed` 1회(§5 ⑥). 그게 전부다.
+
+같은 창에서 **뒤 Phase의 관문 두 개가 부산물로 딸려 온다** — 창을 두 번 열 이유가 없다.
+
+| 부산물 | 무엇의 관문인가 | 어디서 읽나 |
+|---|---|---|
+| 전송 바이트 기준선(전체 스냅숏 방식) | 체크포인트/델타의 절감률 ≥70% KPI **분모** | 업로더 회차 로그 |
+| 저장 클릭을 사람이 몇 번 놓쳤나 | 상주 에이전트(UIA `Invoke` 구독)의 필요성 근거 | `--completed` 실행 수 ↔ 실제 저장 수 |
+
+**관측기는 하나만 띄운다.** 두 개를 돌리면 스풀을 공유해 서로의 파일을 지우고,
+같은 화면이 서로 다른 `eventId`로 두 번 적재돼 적중률 분모가 부푼다 —
+*학습이 아니라 반복을 센* 결과가 된다.
+
+### 10.4 채점과 판정 (Week 2 말)
+
+수기 채점(H1·H3)은 **미루지 않는다.** 화면 기억이 흐려지면 채점 품질이 떨어진다.
+주 1회로 나눠 하는 편이 낫다.
+
+| 지표 | 목표 | 어디서 |
+|---|---|---|
+| 매핑 캐시 적중률 | ≥ 95% | `/v1/metrics.cacheHitRatio` (콘솔 ②) |
+| AI 매핑 정확도 (H3) | ≥ 90% | 콘솔 ⑦에서 수기 채점 |
+| 관측 정확도 (H1) | ≥ 90% | 콘솔 ⑦에서 수기 채점 |
+| 변경 없음 억제율 | ≥ 95% | watch 회차 통계("변화 없음" 비율) |
+| 지연 p95 | ≤ 3s | `/v1/metrics.latencyP95Ms` |
+| LLM 단가 | 예산 내 | `/v1/metrics.{aiCalls,inputTokens}` |
+
+**판정은 H3가 가른다.**
+
+- **H3 ≥ 90%** → Phase 2(Mail·Doc) 설계 착수. Day 1에 걸어 둔 협의가 여기서 회수된다.
+- **H3 < 90%** → 방향은 "축 추가"가 아니라 **프롬프트·온톨로지 개선 루프**다.
+  `PromptBuilder`와 지식 문서를 고치고 재추론시켜 같은 화면으로 다시 잰다.
+  이 루프가 일상이 되면 그때가 LLM 트레이싱(OTel GenAI 컨벤션)을 붙일 시점이다.
+
+적중률만 높고 정확도가 낮은 경우를 특히 주의한다 — **틀린 매핑을 캐시가 잘 재사용하고 있다는 뜻**이다.
+θ 미만 매핑은 캐시에 있어도 적중이 아니므로(ARCHITECTURE §9 KPI 각주), 콘솔 ④에서 보정·승격으로 빠져나간다.
+
+---
+
+## 11. 지금 검증되지 않은 것
 
 정직하게 적어 둔다. 아래는 코드가 없는 게 아니라 **이 환경에서 실행해 보지 못한** 것들이다.
 
