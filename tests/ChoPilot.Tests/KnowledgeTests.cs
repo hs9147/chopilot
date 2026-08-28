@@ -453,7 +453,7 @@ public class KnowledgeEditorTests
     [Fact]
     public void Evidence_CarriesProvenance_ButNoObservedValues()
     {
-        var evidence = BedrockKnowledgeEditor.Evidence(Draft);
+        var evidence = LlmKnowledgeEditor.Evidence(Draft);
 
         Assert.Contains("3회", evidence);
         Assert.Contains("2명", evidence);
@@ -461,14 +461,37 @@ public class KnowledgeEditorTests
         Assert.Contains("집계기가 쓴 본문", evidence);
     }
 
-    [Fact]
-    public void Parse_ReturnsNull_OnEmptyOrMalformed_SoCallerKeepsOriginal()
+    // 빈 응답·거부는 예외가 아니라 빈 텍스트로 돌아온다 — 편집자가 집계기 본문을 유지하는 길.
+    [Theory]
+    [InlineData("""{"content":[]}""")]
+    [InlineData("""{"content":[{"type":"text","text":"   "}]}""")]
+    [InlineData("""{"stop_reason":"refusal"}""")]
+    public async Task EmptyOrRefusedResponse_KeepsAggregatorBody(string response)
     {
-        Assert.Null(BedrockKnowledgeEditor.Parse("""{"content":[]}"""));
-        Assert.Null(BedrockKnowledgeEditor.Parse("""{"content":[{"type":"text","text":"   "}]}"""));
-        Assert.Null(BedrockKnowledgeEditor.Parse("""{"stop_reason":"refusal"}"""));
-        Assert.Equal("다듬은 본문",
-            BedrockKnowledgeEditor.Parse("""{"content":[{"type":"text","text":"  다듬은 본문 "}]}"""));
+        var editor = new LlmKnowledgeEditor(new CannedCompletionClient(response));
+
+        Assert.Equal(Draft.Body, await editor.DescribeAsync(Draft));
+    }
+
+    [Fact]
+    public async Task EditedBody_ReplacesTheAggregatorBody_Trimmed()
+    {
+        var editor = new LlmKnowledgeEditor(new CannedCompletionClient(
+            """{"content":[{"type":"text","text":"  다듬은 본문 "}]}"""));
+
+        Assert.Equal("다듬은 본문", await editor.DescribeAsync(Draft));
+    }
+
+    /// <summary>Bedrock wire format 그대로를 돌려주는 가짜 공급자.</summary>
+    private sealed class CannedCompletionClient : ILlmCompletionClient
+    {
+        private readonly string _bedrockResponse;
+        public CannedCompletionClient(string bedrockResponse) => _bedrockResponse = bedrockResponse;
+
+        public Task<LlmCompletion> CompleteAsync(
+            string systemPrompt, string userPrompt, int maxOutputTokens,
+            bool requireJsonObject, CancellationToken ct = default) =>
+            Task.FromResult(BedrockCompletionClient.Parse(_bedrockResponse));
     }
 }
 
@@ -491,7 +514,9 @@ public class BedrockOntologyFilterTests
         {"content":[{"type":"text","text":"{\"business_object\":\"PurchaseRequest\",\"fields\":[{\"element_ref\":\"n2\",\"concept\":\"결제조건\",\"confidence\":0.9},{\"element_ref\":\"n9\",\"concept\":\"환각개념\",\"confidence\":0.9}]}"}]}
         """;
 
-        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", store.Current.Concepts);
+        var completion = BedrockCompletionClient.Parse(body);
+        var inference = MappingInferenceParser.Parse(
+            completion.Text, "PurchaseRequest", store.Current.Concepts, completion.InputTokens, completion.OutputTokens);
 
         var field = Assert.Single(inference.Fields);
         Assert.Equal("결제조건", field.Concept);      // 게시된 개념은 통과

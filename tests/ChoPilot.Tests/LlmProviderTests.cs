@@ -170,6 +170,29 @@ public class LlmProviderTests
         Assert.Contains("/openai/v1/openai/deployments/gpt-4o/", ex.Message);
     }
 
+    // 공급자를 늘려도 매핑·편집자 경로는 하나다. Bedrock만 IAiMapper·IKnowledgeEditor 를 따로
+    // 구현하던 비대칭이 되살아나면 — 프롬프트·오류 처리 개선이 한 공급자만 비껴가면 —
+    // 이 조립이 컴파일되지 않는다. 클라이언트의 --bedrock 경로도 같은 조립을 쓴다.
+    [Fact]
+    public void EveryProvider_GoesThroughTheSameCompletionSeam()
+    {
+        using var http = new HttpClient(new CapturingHandler("{}"));
+        ILlmCompletionClient[] providers =
+        {
+            new BedrockCompletionClient(null!, "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            new VertexAiCompletionClient(http,
+                new VertexAiOptions("p", "us-central1", "m"), _ => Task.FromResult("t")),
+            new AzureOpenAiCompletionClient(http,
+                new AzureOpenAiOptions("https://x.openai.azure.com", "d", "2024-10-21", "k", null)),
+        };
+
+        foreach (var provider in providers)
+        {
+            Assert.IsAssignableFrom<IAiMapper>(new CompletionClientAiMapper(provider));
+            Assert.IsAssignableFrom<IKnowledgeEditor>(new LlmKnowledgeEditor(provider));
+        }
+    }
+
     [Fact]
     public async Task VertexFailure_CarriesTheResponseBody()
     {

@@ -40,7 +40,8 @@ src/
                        EventSpool(durable 재전송 스풀), Uep(개인 프로파일),
                        Uploader + ObservationDispatcher(전송·스풀 정책) (net8.0, 크로스플랫폼)
   ChoPilot.Mapping/    MappingCache, MappingResolver, StubAiMapper,
-                       BedrockAiMapper, PromptBuilder,
+                       CompletionClientAiMapper + 공급자 어댑터
+                       (Bedrock·Vertex AI·Azure OpenAI), PromptBuilder,
                        BusinessObjectBuilder, GuideService             (net8.0)
   ChoPilot.Client/     UiaObserver + chopilot-dump CLI                 (net8.0-windows, FlaUI)
   ChoPilot.Server/     Ingestion + Guide + Audit + Metrics
@@ -344,12 +345,22 @@ curl        localhost:5080/v1/suggestions              # 수락률·응답률 �
   한 숫자가 된다.
 - 보여준 적 없는 제안에 대한 판단은 **404**. 분모 없는 분자는 KPI를 무의미하게 만든다.
 
-### Bedrock 동적 매핑
+### 동적 매핑 — 공급자는 하나의 seam 뒤에 있다
 
-`BedrockAiMapper`는 표준 AWS 자격증명 체인(환경변수/프로파일/IAM 역할)과 `InvokeModel`(Anthropic Messages)을 사용한다. 테넌트에서 가용한 모델 ID로 교체:
+세 공급자 모두 `ILlmCompletionClient`를 구현하고, 매핑은 `CompletionClientAiMapper`가
+공유한다 — 프롬프트와 모델 출력 allowlist가 공급자마다 갈리지 않는다.
+지식 초안 서술(`LlmKnowledgeEditor`)도 같은 클라이언트를 쓴다.
 
 ```csharp
+// Bedrock — 표준 AWS 자격증명 체인(환경변수/프로파일/IAM 역할) + InvokeModel(Anthropic Messages)
 var bedrock = new Amazon.BedrockRuntime.AmazonBedrockRuntimeClient();
-var mapper  = new BedrockAiMapper(bedrock, "anthropic.claude-3-5-sonnet-20240620-v1:0");
-var resolver = new MappingResolver(new InMemoryMappingCache(), mapper);
+var client  = new BedrockCompletionClient(bedrock, "us.anthropic.claude-haiku-4-5-20251001-v1:0");
+
+// Vertex AI — GCP ADC 체인      : new VertexAiCompletionClient(http, options)
+// Azure OpenAI — deployment     : new AzureOpenAiCompletionClient(http, options)
+
+var resolver = new MappingResolver(new InMemoryMappingCache(), new CompletionClientAiMapper(client));
 ```
+
+Bedrock 모델 ID는 **inference profile**(`us.`/`global.` 접두)이어야 한다 —
+현재 Anthropic 모델은 ON_DEMAND base id로 호출하면 `ResourceNotFoundException`이다.

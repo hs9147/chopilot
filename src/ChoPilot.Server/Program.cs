@@ -160,45 +160,40 @@ builder.Services.AddSingleton<ILlmCompletionClient>(sp =>
     var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient("llm");
     return sp.GetRequiredService<LlmProviderSelection>().Provider switch
     {
+        // 현재 Anthropic 모델은 inference profile ID만 지원(ON_DEMAND base id → ResourceNotFoundException).
+        LlmProviderSetup.Bedrock => new BedrockCompletionClient(
+            sp.GetRequiredService<IAmazonBedrockRuntime>(), BedrockModel(c)),
         LlmProviderSetup.Vertex => new VertexAiCompletionClient(http, LlmProviderSetup.VertexOptions(c)),
         LlmProviderSetup.AzureOpenAi => new AzureOpenAiCompletionClient(http, LlmProviderSetup.AzureOptions(c)),
         var other => throw new InvalidOperationException($"{other}는 completion client를 쓰지 않는다"),
     };
 });
 
+// 세 공급자가 같은 매퍼를 공유한다 — 프롬프트와 모델 출력 allowlist가 공급자마다 갈리지 않는다.
 builder.Services.AddSingleton<IAiMapper>(sp =>
-{
-    var c = sp.GetRequiredService<IConfiguration>();
-    return sp.GetRequiredService<LlmProviderSelection>().Provider switch
-    {
-        LlmProviderSetup.Stub => new StubAiMapper(),
-        // 현재 Anthropic 모델은 inference profile ID만 지원(ON_DEMAND base id → ResourceNotFoundException).
-        LlmProviderSetup.Bedrock => new BedrockAiMapper(
-            sp.GetRequiredService<IAmazonBedrockRuntime>(),
-            c["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
-        _ => new CompletionClientAiMapper(sp.GetRequiredService<ILlmCompletionClient>()),
-    };
-});
+    sp.GetRequiredService<LlmProviderSelection>().UsingStub
+        ? new StubAiMapper()
+        : new CompletionClientAiMapper(sp.GetRequiredService<ILlmCompletionClient>()));
 
 // 지식 초안 서술(§5.5 3단계). 기본은 AI 없음 — 루프는 LLM 없이도 완결된다.
 // Knowledge:UseEditor=true 일 때만 배치에서 초안 1건당 1회 호출된다.
 builder.Services.AddSingleton<IKnowledgeEditor>(sp =>
 {
     var c = sp.GetRequiredService<IConfiguration>();
-    var provider = sp.GetRequiredService<LlmProviderSelection>().Provider;
     if (!c.GetValue<bool>("Knowledge:UseEditor")) return new PassthroughKnowledgeEditor();
 
-    return provider switch
-    {
-        LlmProviderSetup.Bedrock => new BedrockKnowledgeEditor(
-            sp.GetRequiredService<IAmazonBedrockRuntime>(),
-            c["Knowledge:EditorModelId"] ?? c["Aws:BedrockModelId"]
-                ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0"),
-        LlmProviderSetup.Vertex or LlmProviderSetup.AzureOpenAi =>
-            new LlmKnowledgeEditor(sp.GetRequiredService<ILlmCompletionClient>()),
-        // 스텁으로 내려앉았으면 편집자도 없다 — 없는 AI에 본문을 맡길 수 없다.
-        _ => new PassthroughKnowledgeEditor(),
-    };
+    // 스텁으로 내려앉았으면 편집자도 없다 — 없는 AI에 본문을 맡길 수 없다.
+    var selection = sp.GetRequiredService<LlmProviderSelection>();
+    if (selection.UsingStub) return new PassthroughKnowledgeEditor();
+
+    // Bedrock만 편집자 전용 모델을 따로 지정할 수 있다 — 서술은 매핑보다 싼 모델로 충분하다.
+    // 나머지 공급자는 매핑과 같은 클라이언트를 공유한다.
+    var client = selection.Provider == LlmProviderSetup.Bedrock &&
+                 c["Knowledge:EditorModelId"] is { Length: > 0 } editorModel
+        ? new BedrockCompletionClient(sp.GetRequiredService<IAmazonBedrockRuntime>(), editorModel)
+        : sp.GetRequiredService<ILlmCompletionClient>();
+
+    return new LlmKnowledgeEditor(client);
 });
 
 builder.Services.AddSingleton(sp => new MappingResolver(
@@ -989,6 +984,10 @@ app.MapGet("/v1/suggestions", (SuggestionFeedbackStore suggestions, int? limit) 
 // 검수·보정 결정 이력(읽기 전용). 운영은 접근통제(IAM) 하에 노출.
 app.MapGet("/v1/decisions", (DecisionLog decisions, int? limit) =>
     Results.Ok(new { count = decisions.Count, entries = decisions.Snapshot(limit ?? 100) }));
+
+// 매핑과 편집자가 같은 기본값을 봐야 한다 — 갈라지면 한쪽만 조용히 다른 모델로 돈다.
+static string BedrockModel(IConfiguration c) =>
+    c["Aws:BedrockModelId"] ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
 static IResult ObservationAccepted(StoredObservation rec, bool replayed) => Results.Ok(new
 {

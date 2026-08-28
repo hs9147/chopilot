@@ -167,7 +167,8 @@ async Task<ObservationRound> RoundAsync(CancellationToken ct)
             Console.Error.WriteLine($"[chopilot-dump] Bedrock: region={cfg.Aws.Region}, model={cfg.Aws.BedrockModelId}");
             var region = RegionEndpoint.GetBySystemName(cfg.Aws.Region);
             using var bedrock = new AmazonBedrockRuntimeClient(region);
-            await RunMapper("bedrock(ai)", new BedrockAiMapper(bedrock, cfg.Aws.BedrockModelId), maskedTree);
+            await RunMapper("bedrock(ai)", new CompletionClientAiMapper(
+                new BedrockCompletionClient(bedrock, cfg.Aws.BedrockModelId)), maskedTree);
         }
         if (opts.Vertex)
         {

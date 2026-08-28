@@ -290,7 +290,9 @@ public class BedrockParseTests
         {"content":[{"type":"text","text":"결과: {\"business_object\":\"PurchaseRequest\",\"fields\":[{\"element_ref\":\"n2\",\"concept\":\"Material\",\"confidence\":0.95},{\"element_ref\":\"n9\",\"concept\":\"NotARealConcept\",\"confidence\":0.9}]}"}]}
         """;
 
-        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", ProcurementOntology.Concepts);
+        var completion = BedrockCompletionClient.Parse(body);
+        var inference = MappingInferenceParser.Parse(
+            completion.Text, "PurchaseRequest", ProcurementOntology.Concepts, completion.InputTokens, completion.OutputTokens);
 
         Assert.Equal("PurchaseRequest", inference.BusinessObject);
         Assert.Single(inference.Fields);                        // 환각 개념은 제거됨
@@ -305,7 +307,9 @@ public class BedrockParseTests
         {"content":[{"type":"text","text":"{\"business_object\":\"PurchaseRequest\",\"fields\":[]}"}],"usage":{"input_tokens":1234,"output_tokens":56}}
         """;
 
-        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", ProcurementOntology.Concepts);
+        var completion = BedrockCompletionClient.Parse(body);
+        var inference = MappingInferenceParser.Parse(
+            completion.Text, "PurchaseRequest", ProcurementOntology.Concepts, completion.InputTokens, completion.OutputTokens);
 
         Assert.Equal(1234, inference.InputTokens);   // H6 매핑당 비용 산출의 원자료
         Assert.Equal(56, inference.OutputTokens);
@@ -319,7 +323,9 @@ public class BedrockParseTests
         {"content":[{"type":"text","text":"죄송하지만 매핑할 수 없습니다."}],"usage":{"input_tokens":800,"output_tokens":12}}
         """;
 
-        var inference = BedrockAiMapper.Parse(body, "PurchaseRequest", ProcurementOntology.Concepts);
+        var completion = BedrockCompletionClient.Parse(body);
+        var inference = MappingInferenceParser.Parse(
+            completion.Text, "PurchaseRequest", ProcurementOntology.Concepts, completion.InputTokens, completion.OutputTokens);
 
         Assert.Empty(inference.Fields);
         Assert.Equal(800, inference.InputTokens);
